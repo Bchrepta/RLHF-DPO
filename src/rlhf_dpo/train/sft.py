@@ -37,7 +37,7 @@ def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None
     rng.shuffle(help_p)
     rng.shuffle(safe_p)
     n = max(int(len(prefs) * 0.22), 160)
-    n_safe = max(int(n * 0.20), 30)  # few safety examples in SFT
+    n_safe = max(int(n * 0.10), 12)  # few safety examples in SFT
     n_help = n - n_safe
     prefs = help_p[:n_help] + safe_p[:n_safe]
     rng.shuffle(prefs)

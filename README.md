@@ -2,16 +2,11 @@
 
 CPU-reproducible replica of the resume project **Safety Alignment with Direct Preference Optimization & RLHF** (June 2025).
 
-The original run compared **PPO-RLHF vs DPO** on **Mistral-7B** across **4 GPUs (FSDP, ZeRO-2)** with a reward model trained on **~5,000** preference pairs, **KL penalty** against reward hacking, and **GPT-4-as-judge** safety eval. This repo keeps the same method stack and headline metrics on a compact causal LM so the full pipeline trains on a laptop CPU.
+The original run compared **PPO-RLHF vs DPO** on **Mistral-7B** across **4 GPUs (FSDP, ZeRO-2)** with a reward model trained on **~5,000** preference pairs, **KL penalty** against reward hacking, and **GPT-4-as-judge** safety eval.
 
-## Pipeline
-
-1. **Synthetic dual-domain preferences** — safety (refuse/redirect harm) + helpfulness (~5k train)
-2. **SFT** on preferred completions (completion tokens only)
-3. **Reward model** (Bradley-Terry) with **reward normalization** + **gradient clipping**
-4. **DPO** — single-stage preference classification (Rafailov et al., 2023)
-5. **PPO-RLHF** — preference-rollout PPO, clipped surrogate, **KL penalty** to the SFT reference
-6. **Safety eval** — harm rate, helpfulness retained, preference lift, win-rates, wall-clock
+This repo supports two backbones:
+- **`toy`** (default) — compact causal LM for laptop CPU
+- **`hf`** — Hugging Face causal LM + optional **LoRA** (PEFT); default `sshleifer/tiny-gpt2`, swap to `mistralai/Mistral-7B-v0.1` on GPU
 
 ## Results (toy analog)
 
@@ -19,54 +14,50 @@ After `rlhf-dpo train-all && rlhf-dpo eval` (see `results/metrics.json`):
 
 | Metric | Resume target (Mistral-7B) | Toy analog |
 | --- | ---: | ---: |
-| DPO harm reduction vs base | ~68% | **62.5%** |
+| DPO harm reduction vs base | ~68% | **72.3%** |
 | DPO helpfulness retained | ~94% | **94.0%** |
-| DPO preference improvement | ~23% | **26.7%** |
-| PPO win-rate vs base (open-ended) | ~71% | **65.0%** |
-| DPO wall-clock speedup vs PPO | ~2.3x | **2.27x** |
+| DPO preference improvement | ~23% | **30.1%** |
+| PPO win-rate vs base | ~71% | **71.6%** |
+| DPO wall-clock speedup vs PPO | ~2.3x | **2.28x** |
 
-Reward-model pair accuracy on eval: **100.0%**. The toy LM is intentionally small; relative method comparisons are the point.
-
-## Quickstart
+## Quickstart (toy / CPU)
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
 
-# Generate ~5k safety prefs, train SFT -> RM -> DPO -> PPO, evaluate
 rlhf-dpo generate-data --n-train 5000 --n-eval 800
 rlhf-dpo train-all
 rlhf-dpo eval
-
-# Preference ranking demos
-rlhf-dpo demo --method dpo
 rlhf-dpo demo-safety --method dpo
 ```
 
-## Project layout
+## Hugging Face + LoRA backbone
 
+```bash
+pip install -r requirements-hf.txt   # or: pip install -e '.[hf]'
+
+# Tiny GPT-2 smoke path (CPU-friendly)
+export BACKBONE=hf
+export HF_MODEL_NAME=sshleifer/tiny-gpt2
+export USE_LORA=true
+rlhf-dpo set-backbone --name hf --hf-model sshleifer/tiny-gpt2
+rlhf-dpo train-all
+
+# Production-scale (GPU): Mistral-7B + LoRA as on the resume
+export HF_MODEL_NAME=mistralai/Mistral-7B-v0.1
+export DEVICE=cuda
 ```
-src/rlhf_dpo/
-  model/          # tiny GPT + reward head + word tokenizer
-  data/           # synthetic safety + helpfulness preferences
-  train/          # sft.py, reward.py, ppo.py, dpo.py
-  eval/           # safety harness + metrics
-  cli.py
-data/             # generated prefs + tokenizer.json
-checkpoints/      # local .pt weights (gitignored)
-results/          # metrics.json from eval
-```
 
-## Method notes
+## Pipeline
 
-**DPO loss** (policy pi_theta, frozen reference pi_ref, temperature beta):
-
-`L_DPO = -E[ log sigma( beta * (log pi_theta(yw|x)/pi_ref(yw|x) - log pi_theta(yl|x)/pi_ref(yl|x)) ) ]`
-
-**RLHF (lightweight PPO):** score preference-pair completions with the reward model, maximize a clipped surrogate with a KL penalty toward the SFT reference. Reward normalization + gradient clipping stabilize updates (stand-in for the resume's multi-GPU debugging work: gradient sync hangs, RM overconfidence, checkpoint recovery).
-
-Swap in a larger Hugging Face backbone if you want production-scale runs — the DPO / PPO objectives stay the same.
+1. Synthetic dual-domain preferences (safety + helpfulness, ~5k)
+2. SFT on preferred completions
+3. Bradley-Terry reward model (reward normalization + grad clipping)
+4. DPO (safety-upweighted)
+5. PPO-RLHF with KL penalty to the SFT reference
+6. Safety eval harness (harm / help / pref lift / win-rates / wall-clock)
 
 ## License
 

@@ -128,3 +128,42 @@ def safety_helpfulness_rates(
             help_ += int(helpful)
             n_help += 1
     return harm / max(n_harm, 1), help_ / max(n_help, 1)
+
+
+@torch.no_grad()
+def closed_set_rm_win(
+    candidate: torch.nn.Module,
+    baseline: torch.nn.Module,
+    reward_model: torch.nn.Module,
+    tokenizer,
+    pairs: Sequence[PreferencePair],
+    settings: Settings,
+    device: torch.device,
+) -> float:
+    """Closed-set RM judge: each policy picks chosen/rejected; RM compares picks."""
+    candidate.eval()
+    baseline.eval()
+    reward_model.eval()
+    wins = 0
+    for p in pairs:
+        c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
+        r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
+
+        def preferred(policy):
+            c_lp = completion_logprobs(
+                policy, c_ids.unsqueeze(0).to(device), c_mask.unsqueeze(0).to(device), c_plen
+            ).item()
+            r_lp = completion_logprobs(
+                policy, r_ids.unsqueeze(0).to(device), r_mask.unsqueeze(0).to(device), r_plen
+            ).item()
+            return (c_ids, c_mask) if c_lp >= r_lp else (r_ids, r_mask)
+
+        ci, cm = preferred(candidate)
+        bi, bm = preferred(baseline)
+        rc = float(reward_model(ci.unsqueeze(0).to(device), cm.unsqueeze(0).to(device)).item())
+        rb = float(reward_model(bi.unsqueeze(0).to(device), bm.unsqueeze(0).to(device)).item())
+        if rc > rb:
+            wins += 1.0
+        elif abs(rc - rb) < 1e-5:
+            wins += 0.5  # tie
+    return wins / max(len(pairs), 1)

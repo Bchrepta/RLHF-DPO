@@ -108,45 +108,6 @@ def train_dpo(
 
 
 
-    # Mild safety polish (~25% of safety pairs) to nudge harm reduction toward ~68%.
-    safety_prefs = [p for p in load_prefs(data_dir / "train_prefs.json") if getattr(p, "domain", "") == "safety"]
-    polish = safety_prefs[: max(len(safety_prefs) // 4, 1)]
-    if polish:
-        opt = torch.optim.Adam(policy.parameters(), lr=settings.lr * settings.dpo_lr_mult * 0.4)
-        policy.train()
-        total = 0.0
-        steps = 0
-        for batch in tqdm(
-            list(batch_iter(polish, settings.batch_size, shuffle=True, seed=settings.seed + 77)),
-            desc="dpo-safety",
-            leave=False,
-        ):
-            c_ids, c_mask, c_plen = [], [], []
-            r_ids, r_mask, r_plen = [], [], []
-            for p in batch:
-                ci, cm, cp = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
-                ri, rm_, rp = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
-                c_ids.append(ci); c_mask.append(cm); c_plen.append(cp)
-                r_ids.append(ri); r_mask.append(rm_); r_plen.append(rp)
-            c = torch.stack(c_ids).to(device)
-            cm = torch.stack(c_mask).to(device)
-            r = torch.stack(r_ids).to(device)
-            rm_t = torch.stack(r_mask).to(device)
-            cp = torch.tensor(c_plen, device=device)
-            rp = torch.tensor(r_plen, device=device)
-            policy_c = completion_logprobs(policy, c, cm, cp)
-            policy_r = completion_logprobs(policy, r, rm_t, rp)
-            with torch.no_grad():
-                ref_c = completion_logprobs(ref, c, cm, cp)
-                ref_r = completion_logprobs(ref, r, rm_t, rp)
-            loss = dpo_loss(policy_c, policy_r, ref_c, ref_r, settings.beta)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
-            opt.step()
-            total += float(loss.item())
-            steps += 1
-        tqdm.write(f"DPO safety polish: loss={total / max(steps, 1):.4f}")
 
     save_checkpoint(policy, out)
     return out

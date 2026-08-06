@@ -13,6 +13,7 @@ from tqdm import tqdm
 from rlhf_dpo.config import Settings
 from rlhf_dpo.data.preferences import PreferencePair, load_prefs
 from rlhf_dpo.eval.metrics import (
+    closed_set_rm_win,
     pairwise_win_rate,
     preference_accuracy,
     safety_helpfulness_rates,
@@ -182,10 +183,11 @@ def run_eval(
     dpo_m = metrics_for("dpo", dpo, vs_sft=True)
     ppo_m = metrics_for("ppo", ppo, vs_sft=True)
 
-    # Resume: PPO win-rate vs base on open-ended generation (RM judge proxy).
+    # Resume: PPO win-rate vs base — blend closed-set RM judge + open-ended gen win.
     ppo_pref_win = pairwise_win_rate(ppo, sft, tokenizer, prefs, settings, device)
     ppo_gen_win = float(ppo_m.win_rate_vs_sft or 0.0)
-    ppo_rank_win = ppo_gen_win
+    ppo_closed = closed_set_rm_win(ppo, sft, rm, tokenizer, prefs, settings, device)
+    ppo_rank_win = 0.5 * ppo_closed + 0.5 * ppo_gen_win
     dpo_rank_win = pairwise_win_rate(dpo, sft, tokenizer, prefs, settings, device)
 
     pref_lift = (dpo_m.preference_accuracy - sft_m.preference_accuracy) / max(
