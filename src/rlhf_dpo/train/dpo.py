@@ -48,7 +48,7 @@ def train_dpo(
     out = out or (settings.ckpt_dir / "dpo.pt")
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
 
-    tokenizer = build_tokenizer(data_dir)
+    tokenizer = build_tokenizer(data_dir, settings)
     policy = build_lm(settings, tokenizer).to(device)
     ref = build_lm(settings, tokenizer).to(device)
     if sft_ckpt.exists():
@@ -105,6 +105,8 @@ def train_dpo(
             total += float(loss.item())
             steps += 1
         tqdm.write(f"DPO epoch {epoch+1}: loss={total / max(steps, 1):.4f}")
+
+
 
 
     save_checkpoint(policy, out)

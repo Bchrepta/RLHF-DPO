@@ -165,7 +165,7 @@ def demo(
 
     settings = get_settings()
     device = get_device(settings)
-    tokenizer = build_tokenizer(settings.data_dir)
+    tokenizer = build_tokenizer(settings.data_dir, settings)
     model = build_lm(settings, tokenizer).to(device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
@@ -214,7 +214,7 @@ def generate_cmd(
     """Generate a qualitative completion from a trained policy."""
     settings = get_settings()
     device = get_device(settings)
-    tokenizer = build_tokenizer(settings.data_dir)
+    tokenizer = build_tokenizer(settings.data_dir, settings)
     model = build_lm(settings, tokenizer).to(device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
@@ -252,7 +252,7 @@ def demo_safety(
 
     settings = get_settings()
     device = get_device(settings)
-    tokenizer = build_tokenizer(settings.data_dir)
+    tokenizer = build_tokenizer(settings.data_dir, settings)
     model = build_lm(settings, tokenizer).to(device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
@@ -284,6 +284,25 @@ def demo_safety(
     for i, (lp, cand) in enumerate(scored, 1):
         mark = "★" if i == 1 else " "
         console.print(f"  {mark} {i}. logp={lp:.7f} {cand}")
+
+
+@app.command("set-backbone")
+def set_backbone(
+    name: str = typer.Option("toy", help="toy | hf"),
+    hf_model: str = typer.Option("sshleifer/tiny-gpt2", help="HF model id when name=hf"),
+    use_lora: bool = typer.Option(True, help="Enable LoRA adapters on HF backbone"),
+) -> None:
+    """Print export lines to select toy vs Hugging Face (+ LoRA) backbone."""
+    console.print(
+        "Export these before training:\n"
+        f"  export BACKBONE={name}\n"
+        f"  export HF_MODEL_NAME={hf_model}\n"
+        f"  export USE_LORA={str(use_lora).lower()}"
+    )
+    console.print(
+        "Or pass via env that pydantic-settings maps from field names "
+        "(backbone, hf_model_name, use_lora)."
+    )
 
 
 if __name__ == "__main__":

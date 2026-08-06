@@ -7,3 +7,7 @@ rich>=13.7
 tqdm>=4.66
 python-dotenv>=1.0
 pytest>=8.0
+# Optional HF backbone (pip install -r requirements-hf.txt or rlhf-dpo[hf])
+# transformers>=4.40
+# peft>=0.11
+# accelerate>=0.30

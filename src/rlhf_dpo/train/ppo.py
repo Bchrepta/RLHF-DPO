@@ -14,9 +14,12 @@ from rlhf_dpo.utils import (
     build_reward_model,
     build_tokenizer,
     completion_logprob_mean,
+    decode_response,
     encode_pair,
+    encode_prompt,
     get_device,
     load_checkpoint,
+    repetition_penalty,
     save_checkpoint,
     set_seed,
 )
@@ -44,7 +47,7 @@ def train_ppo(
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
     reward_ckpt = reward_ckpt or (settings.ckpt_dir / "reward.pt")
 
-    tokenizer = build_tokenizer(data_dir)
+    tokenizer = build_tokenizer(data_dir, settings)
     policy = build_lm(settings, tokenizer).to(device)
     ref = build_lm(settings, tokenizer).to(device)
     rm = build_reward_model(settings, tokenizer).to(device)
@@ -84,11 +87,11 @@ def train_ppo(
         for p in old_policy.parameters():
             p.requires_grad_(False)
 
-        # Sample chosen with high probability (reward-seeking), else rejected.
+        # Preference-pair rollouts (chosen-heavy) with KL to SFT reference.
         ids_list, mask_list, plen_list, rewards = [], [], [], []
         with torch.no_grad():
             for i, pair in enumerate(batch):
-                use_chosen = (i % 3) != 0  # 2/3 chosen, 1/3 rejected exploration
+                use_chosen = (i % 3) != 0
                 resp = pair.chosen if use_chosen else pair.rejected
                 ids, mask, plen = encode_pair(tokenizer, pair.prompt, resp, settings.max_seq_len)
                 ids_b = ids.unsqueeze(0).to(device)

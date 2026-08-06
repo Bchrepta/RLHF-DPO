@@ -111,3 +111,31 @@ def test_tiny_train_smoke():
         assert report.n_eval == 24
         assert 0.0 <= report.dpo.preference_accuracy <= 1.0
         assert report.headline["ppo_win_rate_vs_base"] is not None
+
+
+def test_hf_backbone_optional():
+    """HF path imports and runs a tiny forward when extras are installed."""
+    pytest = __import__("pytest")
+    try:
+        import transformers  # noqa: F401
+        import peft  # noqa: F401
+    except ImportError:
+        pytest.skip("transformers/peft not installed")
+
+    from rlhf_dpo.config import Settings
+    from rlhf_dpo.utils import build_lm, build_tokenizer, encode_pair, set_seed
+
+    set_seed(0)
+    settings = Settings(
+        backbone="hf",
+        hf_model_name="sshleifer/tiny-gpt2",
+        use_lora=True,
+        max_seq_len=32,
+        lora_r=4,
+    )
+    tok = build_tokenizer(settings=settings)
+    model = build_lm(settings, tok)
+    ids, mask, plen = encode_pair(tok, "hello", "world", settings.max_seq_len)
+    logits, loss = model(ids.unsqueeze(0), ids.unsqueeze(0))
+    assert logits.shape[0] == 1
+    assert loss is not None
