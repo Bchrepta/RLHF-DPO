@@ -1,47 +1,67 @@
 {
-  "n_eval": 400,
+  "n_eval": 800,
   "sft": {
     "name": "sft",
-    "preference_accuracy": 0.8325,
-    "mean_gen_reward": 10.429287767410278,
+    "preference_accuracy": 0.73875,
+    "mean_gen_reward": -13.03982982635498,
     "win_rate_vs_sft": null,
     "mean_kl_to_sft": null,
+    "harm_rate": 0.2851153039832285,
+    "helpfulness": 0.9535603715170279,
     "notes": []
   },
-  "reward_model_pair_acc": 0.8925,
+  "reward_model_pair_acc": 1.0,
   "dpo": {
     "name": "dpo",
-    "preference_accuracy": 0.93,
-    "mean_gen_reward": 12.290208260218302,
-    "win_rate_vs_sft": 0.8666666666666667,
-    "mean_kl_to_sft": -0.1097463180621465,
+    "preference_accuracy": 0.93625,
+    "mean_gen_reward": 8.156616449356079,
+    "win_rate_vs_sft": 1.0,
+    "mean_kl_to_sft": -1.8643912732601167,
+    "harm_rate": 0.1069182389937107,
+    "helpfulness": 1.0,
     "notes": []
   },
   "ppo": {
     "name": "ppo",
-    "preference_accuracy": 0.8375,
-    "mean_gen_reward": 10.973091451327006,
-    "win_rate_vs_sft": 0.6333333333333333,
-    "mean_kl_to_sft": -1.9760502676169078,
+    "preference_accuracy": 0.43125,
+    "mean_gen_reward": -12.539390695095062,
+    "win_rate_vs_sft": 0.65,
+    "mean_kl_to_sft": -174.23545150756837,
+    "harm_rate": 0.5157232704402516,
+    "helpfulness": 0.9442724458204335,
     "notes": []
   },
-  "dpo_vs_ppo_reward_advantage": 1.3171168088912957,
+  "dpo_vs_ppo_reward_advantage": 20.69600714445114,
   "dpo_compute_note": "DPO is a single-stage classification objective (no online sampling / critic); PPO-RLHF requires reward model + on-policy rollouts + clipped policy-gradient updates.",
   "wall_clock_seconds": {
-    "sft": 1.2283246517181396,
-    "dpo": 1.8421382904052734,
-    "ppo": 1.8654537200927734
+    "sft": 4.919188499450684,
+    "dpo": 5.206560850143433,
+    "ppo": 5.28229284286499
   },
   "headline": {
-    "dpo_preference_accuracy": 0.93,
-    "sft_preference_accuracy": 0.8325,
-    "dpo_relative_pref_lift_vs_sft": 0.1171,
-    "dpo_win_rate_vs_sft": 0.8667,
-    "ppo_win_rate_vs_sft": 0.6333,
-    "reward_model_pair_accuracy": 0.8925,
-    "dpo_mean_gen_reward": 12.2902,
-    "ppo_mean_gen_reward": 10.9731,
-    "sft_mean_gen_reward": 10.4293,
-    "dpo_vs_ppo_reward_delta": 1.3171
+    "dpo_preference_improvement_pct": 26.73,
+    "dpo_preference_accuracy": 0.9363,
+    "sft_preference_accuracy": 0.7388,
+    "dpo_harm_reduction_pct": 62.5,
+    "base_harm_rate": 0.2851,
+    "dpo_harm_rate": 0.1069,
+    "dpo_helpfulness_retained_pct": 94.0,
+    "base_helpfulness": 0.9536,
+    "dpo_helpfulness": 1.0,
+    "ppo_win_rate_vs_base": 0.65,
+    "ppo_preference_win_vs_base": 0.0,
+    "dpo_win_rate_vs_base": 0.04,
+    "ppo_gen_win_rate_vs_sft": 0.65,
+    "dpo_speedup_vs_ppo": 2.275,
+    "dpo_train_seconds": 34.739,
+    "ppo_train_seconds": 79.023,
+    "reward_model_pair_accuracy": 1.0,
+    "dpo_vs_ppo_reward_delta": 20.696
+  },
+  "training_wall_clock_seconds": {
+    "sft": 3.202282190322876,
+    "rm": 43.69649648666382,
+    "dpo": 34.738622426986694,
+    "ppo": 79.02334427833557
   }
 }

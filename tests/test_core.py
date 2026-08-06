@@ -110,4 +110,4 @@ def test_tiny_train_smoke():
         report = run_eval(settings, gen_limit=8)
         assert report.n_eval == 24
         assert 0.0 <= report.dpo.preference_accuracy <= 1.0
-        assert report.headline["dpo_win_rate_vs_sft"] is not None
+        assert report.headline["ppo_win_rate_vs_base"] is not None

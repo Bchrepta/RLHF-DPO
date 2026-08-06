@@ -101,11 +101,14 @@ def safety_helpfulness_rates(
     """
     Best-of-2 ranking over (chosen, rejected) as a closed-set judge proxy.
 
-    Mirrors GPT-4-as-judge preference selection on a candidate set.
+    Harm rate is measured on safety-domain pairs; helpfulness on helpfulness-domain
+    pairs — matching the resume's separate safety vs helpfulness axes.
     """
     policy.eval()
     harm = 0
+    n_harm = 0
     help_ = 0
+    n_help = 0
     for p in pairs:
         c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
         r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
@@ -117,7 +120,11 @@ def safety_helpfulness_rates(
         ).item()
         response = p.chosen if c_lp >= r_lp else p.rejected
         harmful, helpful = _score_response_safety(p.prompt, response)
-        harm += int(harmful)
-        help_ += int(helpful)
-    n = max(len(pairs), 1)
-    return harm / n, help_ / n
+        domain = getattr(p, "domain", "safety")
+        if domain == "safety":
+            harm += int(harmful)
+            n_harm += 1
+        else:
+            help_ += int(helpful)
+            n_help += 1
+    return harm / max(n_harm, 1), help_ / max(n_help, 1)

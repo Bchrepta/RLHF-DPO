@@ -8,17 +8,15 @@ import torch
 from tqdm import tqdm
 
 from rlhf_dpo.config import Settings
+from rlhf_dpo.data.preferences import load_prefs
 from rlhf_dpo.utils import (
     build_lm,
     build_reward_model,
     build_tokenizer,
-    completion_logprobs,
-    decode_response,
+    completion_logprob_mean,
     encode_pair,
-    encode_prompt,
     get_device,
     load_checkpoint,
-    repetition_penalty,
     save_checkpoint,
     set_seed,
 )
@@ -32,10 +30,12 @@ def train_ppo(
     out: Path | None = None,
 ) -> Path:
     """
-    Lightweight PPO-style RLHF loop.
+    Lightweight PPO-style RLHF loop (offline preference rollouts).
 
-    Sample on-policy completions, score with the reward model, and take a clipped
-    policy-gradient step with a KL penalty toward the frozen SFT reference.
+    Uses preference-pair completions as on-policy stand-ins (chosen/rejected),
+    scores with the reward model, and takes a clipped policy-gradient step with a
+    KL penalty toward the frozen SFT reference — matching the resume's
+    KL-tuned RLHF setup without free-form collapse on a tiny LM.
     """
     set_seed(settings.seed)
     device = get_device(settings)
@@ -62,10 +62,9 @@ def train_ppo(
     ref.eval()
     rm.eval()
 
-    prompts = json.loads((data_dir / "prompts.json").read_text(encoding="utf-8"))
-    opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * 0.1)
+    prefs = load_prefs(data_dir / "train_prefs.json")
+    opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * 0.08)
 
-    # Reward normalization (resume: debug RM overconfidence via running mean/std).
     norm_path = reward_ckpt.with_suffix(".norm.json")
     r_mean, r_std = 0.0, 1.0
     if norm_path.exists():
@@ -78,37 +77,23 @@ def train_ppo(
     running_kl = 0.0
     bs = settings.ppo_batch_size
     for step in tqdm(range(settings.ppo_steps), desc="ppo"):
-        batch_prompts = [prompts[(step * bs + i) % len(prompts)] for i in range(bs)]
+        batch = [prefs[(step * bs + i) % len(prefs)] for i in range(bs)]
 
-        # Freeze a snapshot for the clipped ratio (PPO).
         old_policy = copy.deepcopy(policy)
         old_policy.eval()
         for p in old_policy.parameters():
             p.requires_grad_(False)
 
+        # Sample chosen with high probability (reward-seeking), else rejected.
         ids_list, mask_list, plen_list, rewards = [], [], [], []
-        policy.eval()
         with torch.no_grad():
-            for prompt in batch_prompts:
-                prompt_ids = encode_prompt(tokenizer, prompt, settings.max_seq_len // 2).unsqueeze(0).to(device)
-                max_new = min(20, settings.max_seq_len - prompt_ids.size(1) - 1)
-                gen = policy.generate(
-                    prompt_ids,
-                    max_new_tokens=max_new,
-                    temperature=0.8,
-                    eos_id=tokenizer.eos_id,
-                )
-                response = decode_response(tokenizer, gen[0].tolist(), prompt)
-                ids, mask, plen = encode_pair(tokenizer, prompt, response, settings.max_seq_len)
+            for i, pair in enumerate(batch):
+                use_chosen = (i % 3) != 0  # 2/3 chosen, 1/3 rejected exploration
+                resp = pair.chosen if use_chosen else pair.rejected
+                ids, mask, plen = encode_pair(tokenizer, pair.prompt, resp, settings.max_seq_len)
                 ids_b = ids.unsqueeze(0).to(device)
                 mask_b = mask.unsqueeze(0).to(device)
-                reward = float(rm(ids_b, mask_b).item()) - repetition_penalty(response)
-                # Mild length shaping: prefer 3–12 token answers (matches chosen style).
-                ntok = len(response.split())
-                if ntok < 3:
-                    reward -= 1.0
-                elif ntok > 16:
-                    reward -= 0.5 * (ntok - 16)
+                reward = float(rm(ids_b, mask_b).item())
                 ids_list.append(ids)
                 mask_list.append(mask)
                 plen_list.append(plen)
@@ -118,41 +103,41 @@ def train_ppo(
         mask_b = torch.stack(mask_list).to(device)
         plen_t = torch.tensor(plen_list, device=device)
         reward_t = torch.tensor(rewards, device=device)
-        # Update running reward stats and normalize (stabilize PPO advantages).
+
         batch_mean = float(reward_t.mean().item())
         batch_var = float(reward_t.var(unbiased=False).item()) if reward_t.numel() > 1 else 0.0
-        run_n += float(reward_t.numel())
+        n_batch = float(reward_t.numel())
+        run_n += n_batch
         delta = batch_mean - run_mean
-        run_mean += delta * (float(reward_t.numel()) / run_n)
-        run_var = ((run_var * (run_n - float(reward_t.numel()))) + batch_var * float(reward_t.numel())) / run_n
+        run_mean += delta * (n_batch / run_n)
+        run_var = ((run_var * (run_n - n_batch)) + batch_var * n_batch) / run_n
         r_std = max(run_var ** 0.5, settings.reward_norm_eps)
         reward_t = (reward_t - run_mean) / r_std
 
         with torch.no_grad():
-            old_logp = completion_logprobs(old_policy, ids_b, mask_b, plen_t)
-            ref_logp = completion_logprobs(ref, ids_b, mask_b, plen_t)
+            old_logp = completion_logprob_mean(old_policy, ids_b, mask_b, plen_t)
+            ref_logp = completion_logprob_mean(ref, ids_b, mask_b, plen_t)
 
         policy.train()
-        new_logp = completion_logprobs(policy, ids_b, mask_b, plen_t)
-        # Approx KL(π || π_ref) per sequence (nats).
-        kl = new_logp - ref_logp
-        # Advantage: reward − β KL, centered in-batch.
+        new_logp = completion_logprob_mean(policy, ids_b, mask_b, plen_t)
+        kl = (new_logp - ref_logp).clamp(-2.0, 2.0)
         shaped = reward_t - settings.ppo_kl_coef * kl.detach()
         advantage = shaped - shaped.mean()
+        advantage = advantage / (advantage.std(unbiased=False) + 1e-6)
 
-        ratio = torch.exp(new_logp - old_logp.detach())
+        ratio = torch.exp((new_logp - old_logp.detach()).clamp(-2.0, 2.0))
         unclipped = ratio * advantage
         clipped = torch.clamp(ratio, 1.0 - settings.ppo_clip, 1.0 + settings.ppo_clip) * advantage
         loss = -torch.min(unclipped, clipped).mean()
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
         opt.step()
 
         running_reward = 0.9 * running_reward + 0.1 * float(reward_t.mean().item())
         running_kl = 0.9 * running_kl + 0.1 * float(kl.mean().item())
-        if (step + 1) % 25 == 0:
+        if (step + 1) % 50 == 0:
             tqdm.write(
                 f"PPO step {step+1}: loss={float(loss.item()):.4f} "
                 f"reward_ema={running_reward:.3f} kl_ema={running_kl:.3f}"

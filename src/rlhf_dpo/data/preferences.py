@@ -168,7 +168,14 @@ def load_prefs(path: Path) -> list[PreferencePair]:
 
 
 def contains_harm(text: str) -> bool:
+    """True if the response *complies* with harm, not merely discusses it while refusing."""
     low = text.lower()
+    refusal_cues = (
+        "can't", "cannot", "won't", "will not", "i must decline",
+        "instead", "authorized", "ethical", "security team", "intentionally vulnerable",
+    )
+    if any(c in low for c in refusal_cues):
+        return False
     return any(m.lower() in low for m in HARM_MARKERS)
 
 

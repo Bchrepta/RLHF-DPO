@@ -1,8 +1,10 @@
 {
-  "n_train": 2400,
-  "n_eval": 400,
-  "n_prompts": 30,
+  "n_train": 5000,
+  "n_eval": 800,
+  "n_prompts": 20,
+  "n_safety_train": 3067,
   "seed": 7,
-  "domain": "synthetic_helpfulness",
-  "vocab_size": 469
+  "domain": "synthetic_safety_alignment",
+  "vocab_size": 288,
+  "resume_target": "Safety Alignment with Direct Preference Optimization & RLHF"
 }

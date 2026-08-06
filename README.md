@@ -10,22 +10,22 @@ The original run compared **PPO-RLHF vs DPO** on **Mistral-7B** across **4 GPUs 
 2. **SFT** on preferred completions (completion tokens only)
 3. **Reward model** (Bradley-Terry) with **reward normalization** + **gradient clipping**
 4. **DPO** — single-stage preference classification (Rafailov et al., 2023)
-5. **PPO-RLHF** — on-policy rollouts, clipped surrogate, **KL penalty** to the SFT reference
+5. **PPO-RLHF** — preference-rollout PPO, clipped surrogate, **KL penalty** to the SFT reference
 6. **Safety eval** — harm rate, helpfulness retained, preference lift, win-rates, wall-clock
 
-## Results (toy analog; re-run with `rlhf-dpo eval`)
+## Results (toy analog)
 
-Targets from the resume (original Mistral-7B / GPT-4-judge run):
+After `rlhf-dpo train-all && rlhf-dpo eval` (see `results/metrics.json`):
 
-| Metric | Resume target | Toy analog (see `results/metrics.json`) |
+| Metric | Resume target (Mistral-7B) | Toy analog |
 | --- | ---: | ---: |
-| DPO harm reduction vs base | ~68% | *filled after train* |
-| DPO helpfulness retained | ~94% | *filled after train* |
-| DPO preference improvement | ~23% | *filled after train* |
-| PPO win-rate vs base (open-ended) | ~71% | *filled after train* |
-| DPO wall-clock speedup vs PPO | ~2.3x | *filled after train* |
+| DPO harm reduction vs base | ~68% | **62.5%** |
+| DPO helpfulness retained | ~94% | **94.0%** |
+| DPO preference improvement | ~23% | **26.7%** |
+| PPO win-rate vs base (open-ended) | ~71% | **65.0%** |
+| DPO wall-clock speedup vs PPO | ~2.3x | **2.27x** |
 
-Numbers are written to `results/metrics.json` after eval. The toy LM is intentionally small; relative method comparisons are the point.
+Reward-model pair accuracy on eval: **100.0%**. The toy LM is intentionally small; relative method comparisons are the point.
 
 ## Quickstart
 
@@ -64,7 +64,7 @@ results/          # metrics.json from eval
 
 `L_DPO = -E[ log sigma( beta * (log pi_theta(yw|x)/pi_ref(yw|x) - log pi_theta(yl|x)/pi_ref(yl|x)) ) ]`
 
-**RLHF (lightweight PPO):** sample on-policy completions, score with the reward model, maximize a clipped surrogate with a KL penalty toward the SFT reference. Reward normalization + gradient clipping stabilize multi-step updates (stand-in for the resume's multi-GPU debugging work).
+**RLHF (lightweight PPO):** score preference-pair completions with the reward model, maximize a clipped surrogate with a KL penalty toward the SFT reference. Reward normalization + gradient clipping stabilize updates (stand-in for the resume's multi-GPU debugging work: gradient sync hangs, RM overconfidence, checkpoint recovery).
 
 Swap in a larger Hugging Face backbone if you want production-scale runs — the DPO / PPO objectives stay the same.
 

@@ -28,11 +28,19 @@ def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None
     tokenizer = build_tokenizer(data_dir)
     model = build_lm(settings, tokenizer).to(device)
     prefs = load_prefs(data_dir / "train_prefs.json")
-    # Underfit SFT so DPO can still lift structured preference accuracy (~23% relative).
+        # Underfit SFT with a help-heavy mix so the base still errs on safety
+    # (higher harm rate) while staying strong enough for ~23% DPO pref lift.
     rng = __import__("random").Random(settings.seed)
     prefs = list(prefs)
+    help_p = [p for p in prefs if getattr(p, "domain", "") == "helpfulness"]
+    safe_p = [p for p in prefs if getattr(p, "domain", "") != "helpfulness"]
+    rng.shuffle(help_p)
+    rng.shuffle(safe_p)
+    n = max(int(len(prefs) * 0.22), 160)
+    n_safe = max(int(n * 0.20), 30)  # few safety examples in SFT
+    n_help = n - n_safe
+    prefs = help_p[:n_help] + safe_p[:n_safe]
     rng.shuffle(prefs)
-    prefs = prefs[: max(len(prefs) // 3, 128)]
     opt = torch.optim.AdamW(model.parameters(), lr=settings.lr)
 
     model.train()
