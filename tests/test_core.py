@@ -65,9 +65,11 @@ def test_write_dataset_and_encode(tmp_path: Path):
     assert meta["n_train"] == 20
     assert (tmp_path / "train_prefs.json").exists()
     tok = build_tokenizer()
-    ids, mask = encode_pair(tok, "prompt?", "chosen answer", max_len=32)
+    ids, mask, plen = encode_pair(tok, "prompt?", "chosen answer", max_len=32)
     assert ids.shape[0] == 32
     assert mask.sum() > 0
+    assert 1 < plen < 32
+    assert ids[plen - 1].item() == tok.sep_id
 
 
 def test_tiny_train_smoke():
@@ -91,7 +93,8 @@ def test_tiny_train_smoke():
             sft_epochs=1,
             rm_epochs=1,
             dpo_epochs=1,
-            ppo_steps=8,
+            ppo_steps=4,
+            ppo_batch_size=2,
             batch_size=16,
             data_dir=root / "data",
             ckpt_dir=root / "ckpt",

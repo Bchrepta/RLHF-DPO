@@ -48,13 +48,13 @@ def train_reward_model(
         n = 0
         for batch in tqdm(
             list(batch_iter(prefs, settings.batch_size, shuffle=True, seed=settings.seed + epoch)),
-            desc=f"rm:{epoch+1}/{settings.rm_epochs}",
+            desc=f"rm {epoch+1}/{settings.rm_epochs}",
             leave=False,
         ):
             chosen_ids, chosen_mask, rejected_ids, rejected_mask = [], [], [], []
             for p in batch:
-                c_ids, c_mask = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
-                r_ids, r_mask = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
+                c_ids, c_mask, _ = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
+                r_ids, r_mask, _ = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
                 chosen_ids.append(c_ids)
                 chosen_mask.append(c_mask)
                 rejected_ids.append(r_ids)
@@ -62,10 +62,10 @@ def train_reward_model(
             c = torch.stack(chosen_ids).to(device)
             cm = torch.stack(chosen_mask).to(device)
             r = torch.stack(rejected_ids).to(device)
-            rm_ = torch.stack(rejected_mask).to(device)
+            rm_m = torch.stack(rejected_mask).to(device)
             r_chosen = rm(c, cm)
-            r_rejected = rm(r, rm_)
-            # Bradley-Terry: -log σ(r_c - r_r)
+            r_rejected = rm(r, rm_m)
+            # Bradley-Terry: -log σ(r_c − r_r)
             loss = -F.logsigmoid(r_chosen - r_rejected).mean()
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -75,7 +75,7 @@ def train_reward_model(
             correct += int((r_chosen > r_rejected).sum().item())
             n += len(batch)
         tqdm.write(
-            f"RM epoch {epoch+1}: loss={total / max(len(prefs)//settings.batch_size, 1):.4f} "
+            f"RM epoch {epoch+1}: loss={total / max(len(prefs) // settings.batch_size, 1):.4f} "
             f"pair_acc={correct / max(n, 1):.3f}"
         )
 

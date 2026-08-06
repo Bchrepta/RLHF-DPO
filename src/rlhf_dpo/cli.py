@@ -106,7 +106,7 @@ def eval_cmd(
     table = Table(title="RLHF / DPO Evaluation")
     table.add_column("Method")
     table.add_column("Pref Acc", justify="right")
-    table.add_column("Reward Margin", justify="right")
+    table.add_column("Gen Reward", justify="right")
     table.add_column("Win vs SFT", justify="right")
     table.add_column("KL→SFT", justify="right")
 
@@ -114,7 +114,7 @@ def eval_cmd(
         table.add_row(
             m.name.upper(),
             f"{m.preference_accuracy:.3f}",
-            f"{m.mean_reward_margin:.3f}",
+            f"{m.mean_gen_reward:.3f}",
             "-" if m.win_rate_vs_sft is None else f"{m.win_rate_vs_sft:.3f}",
             "-" if m.mean_kl_to_sft is None else f"{m.mean_kl_to_sft:.3f}",
         )

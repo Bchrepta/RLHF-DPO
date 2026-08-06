@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
 
 from rlhf_dpo.config import Settings
@@ -12,6 +12,7 @@ from rlhf_dpo.utils import (
     build_lm,
     build_reward_model,
     build_tokenizer,
+    completion_logprobs,
     encode_pair,
     encode_prompt,
     get_device,
@@ -31,9 +32,8 @@ def train_ppo(
     """
     Lightweight PPO-style RLHF loop.
 
-    For each step: sample a prompt, generate a completion from the policy,
-    score with the reward model, and take a clipped policy-gradient step with
-    a KL penalty toward the frozen SFT reference (classic RLHF objective).
+    Sample on-policy completions, score with the reward model, and take a clipped
+    policy-gradient step with a KL penalty toward the frozen SFT reference.
     """
     set_seed(settings.seed)
     device = get_device(settings)
@@ -60,44 +60,70 @@ def train_ppo(
     ref.eval()
     rm.eval()
 
-    import json
-
     prompts = json.loads((data_dir / "prompts.json").read_text(encoding="utf-8"))
     opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * 0.5)
 
     running_reward = 0.0
+    running_kl = 0.0
+    bs = settings.ppo_batch_size
     for step in tqdm(range(settings.ppo_steps), desc="ppo"):
-        prompt = prompts[step % len(prompts)]
-        prompt_ids = encode_prompt(tokenizer, prompt, settings.max_seq_len // 2).unsqueeze(0).to(device)
+        batch_prompts = [prompts[(step * bs + i) % len(prompts)] for i in range(bs)]
 
-        # Capture old logprob for clipped surrogate by freezing a snapshot.
+        # Freeze a snapshot for the clipped ratio (PPO).
         old_policy = copy.deepcopy(policy)
         old_policy.eval()
         for p in old_policy.parameters():
             p.requires_grad_(False)
 
+        ids_list, mask_list, plen_list, rewards = [], [], [], []
+        policy.eval()
         with torch.no_grad():
-            gen = policy.generate(
-                prompt_ids,
-                max_new_tokens=min(24, settings.max_seq_len - prompt_ids.size(1)),
-                temperature=0.9,
-                eos_id=tokenizer.eos_id,
-            )
-            # Decode response portion for reward scoring.
-            full_text = tokenizer.decode(gen[0].tolist(), skip_special=True)
-            response = full_text[len(prompt) :].strip() or full_text
-            ids, mask = encode_pair(tokenizer, prompt, response, settings.max_seq_len)
-            ids = ids.unsqueeze(0).to(device)
-            mask = mask.unsqueeze(0).to(device)
-            reward = rm(ids, mask)
-            old_logp = old_policy.logprobs(ids, mask)
-            ref_logp = ref.logprobs(ids, mask)
+            for prompt in batch_prompts:
+                prompt_ids = encode_prompt(tokenizer, prompt, settings.max_seq_len // 2).unsqueeze(0).to(device)
+                max_new = min(32, settings.max_seq_len - prompt_ids.size(1) - 1)
+                gen = policy.generate(
+                    prompt_ids,
+                    max_new_tokens=max_new,
+                    temperature=0.9,
+                    eos_id=tokenizer.eos_id,
+                )
+                # Decode only generated continuation after SEP.
+                full = tokenizer.decode(gen[0].tolist(), skip_special=False)
+                # Split on sep token text if present.
+                sep = tokenizer.sep_token
+                if sep in full:
+                    response = full.split(sep, 1)[1]
+                    response = response.replace(tokenizer.eos_token, "").replace(tokenizer.pad_token, "").strip()
+                else:
+                    response = tokenizer.decode(gen[0].tolist(), skip_special=True)
+                    response = response[len(prompt) :].strip()
+                if not response:
+                    response = "..."
+                ids, mask, plen = encode_pair(tokenizer, prompt, response, settings.max_seq_len)
+                ids_b = ids.unsqueeze(0).to(device)
+                mask_b = mask.unsqueeze(0).to(device)
+                reward = float(rm(ids_b, mask_b).item())
+                ids_list.append(ids)
+                mask_list.append(mask)
+                plen_list.append(plen)
+                rewards.append(reward)
+
+        ids_b = torch.stack(ids_list).to(device)
+        mask_b = torch.stack(mask_list).to(device)
+        plen_t = torch.tensor(plen_list, device=device)
+        reward_t = torch.tensor(rewards, device=device)
+
+        with torch.no_grad():
+            old_logp = completion_logprobs(old_policy, ids_b, mask_b, plen_t)
+            ref_logp = completion_logprobs(ref, ids_b, mask_b, plen_t)
 
         policy.train()
-        new_logp = policy.logprobs(ids, mask)
-        # KL approx vs reference
+        new_logp = completion_logprobs(policy, ids_b, mask_b, plen_t)
+        # Approx KL(π || π_ref) per sequence (nats).
         kl = new_logp - ref_logp
-        advantage = (reward - settings.ppo_kl_coef * kl).detach()
+        # Advantage: reward − β KL, centered in-batch.
+        shaped = reward_t - settings.ppo_kl_coef * kl.detach()
+        advantage = shaped - shaped.mean()
 
         ratio = torch.exp(new_logp - old_logp.detach())
         unclipped = ratio * advantage
@@ -109,11 +135,12 @@ def train_ppo(
         torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
         opt.step()
 
-        running_reward = 0.9 * running_reward + 0.1 * float(reward.mean().item())
-        if (step + 1) % 30 == 0:
+        running_reward = 0.9 * running_reward + 0.1 * float(reward_t.mean().item())
+        running_kl = 0.9 * running_kl + 0.1 * float(kl.mean().item())
+        if (step + 1) % 25 == 0:
             tqdm.write(
                 f"PPO step {step+1}: loss={float(loss.item()):.4f} "
-                f"reward_ema={running_reward:.3f} kl={float(kl.mean().item()):.3f}"
+                f"reward_ema={running_reward:.3f} kl_ema={running_kl:.3f}"
             )
 
     save_checkpoint(policy, out)

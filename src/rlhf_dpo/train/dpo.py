@@ -12,6 +12,7 @@ from rlhf_dpo.utils import (
     batch_iter,
     build_lm,
     build_tokenizer,
+    completion_logprobs,
     encode_pair,
     get_device,
     load_checkpoint,
@@ -66,27 +67,32 @@ def train_dpo(
         steps = 0
         for batch in tqdm(
             list(batch_iter(prefs, settings.batch_size, shuffle=True, seed=settings.seed + epoch)),
-            desc=f"dpo:{epoch+1}/{settings.dpo_epochs}",
+            desc=f"dpo {epoch+1}/{settings.dpo_epochs}",
             leave=False,
         ):
-            c_ids, c_mask, r_ids, r_mask = [], [], [], []
+            c_ids, c_mask, c_plen = [], [], []
+            r_ids, r_mask, r_plen = [], [], []
             for p in batch:
-                ci, cm = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
-                ri, rm = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
+                ci, cm, cp = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
+                ri, rm, rp = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
                 c_ids.append(ci)
                 c_mask.append(cm)
+                c_plen.append(cp)
                 r_ids.append(ri)
                 r_mask.append(rm)
+                r_plen.append(rp)
             c = torch.stack(c_ids).to(device)
             cm = torch.stack(c_mask).to(device)
             r = torch.stack(r_ids).to(device)
             rm = torch.stack(r_mask).to(device)
+            cp = torch.tensor(c_plen, device=device)
+            rp = torch.tensor(r_plen, device=device)
 
-            policy_c = policy.logprobs(c, cm)
-            policy_r = policy.logprobs(r, rm)
+            policy_c = completion_logprobs(policy, c, cm, cp)
+            policy_r = completion_logprobs(policy, r, rm, rp)
             with torch.no_grad():
-                ref_c = ref.logprobs(c, cm)
-                ref_r = ref.logprobs(r, rm)
+                ref_c = completion_logprobs(ref, c, cm, cp)
+                ref_r = completion_logprobs(ref, r, rm, rp)
 
             loss = dpo_loss(policy_c, policy_r, ref_c, ref_r, settings.beta)
             opt.zero_grad(set_to_none=True)

@@ -46,21 +46,79 @@ def encode_pair(
     prompt: str,
     response: str,
     max_len: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return (input_ids, attention_mask) for prompt+response."""
-    text = f"{prompt} {response}"
-    ids = tokenizer.encode(text, add_special=True, max_len=max_len)
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """
+    Encode prompt/response as ``[BOS] prompt [SEP] response [EOS]``.
+
+    Returns ``(input_ids, attention_mask, prompt_len)`` where ``prompt_len`` is the
+    number of tokens up to and including ``[SEP]`` (completion starts after that).
+    """
+    p = tokenizer.encode(prompt, add_special=False)
+    r = tokenizer.encode(response, add_special=False)
+    ids = [tokenizer.bos_id] + p + [tokenizer.sep_id] + r + [tokenizer.eos_id]
+    prompt_len = 1 + len(p) + 1  # bos + prompt + sep
+    if len(ids) > max_len:
+        ids = ids[:max_len]
+        # Keep at least one completion token when possible.
+        prompt_len = min(prompt_len, max_len - 1)
+    if len(ids) < max_len:
+        ids = ids + [tokenizer.pad_id] * (max_len - len(ids))
     attn = [0 if i == tokenizer.pad_id else 1 for i in ids]
-    return torch.tensor(ids, dtype=torch.long), torch.tensor(attn, dtype=torch.long)
+    return (
+        torch.tensor(ids, dtype=torch.long),
+        torch.tensor(attn, dtype=torch.long),
+        prompt_len,
+    )
 
 
 def encode_prompt(tokenizer: CharTokenizer, prompt: str, max_len: int) -> torch.Tensor:
-    # Leave room for generation; do not pad to max for generation prompts.
-    ids = tokenizer.encode(prompt, add_special=True)
-    # Drop trailing eos so generation continues.
-    if ids and ids[-1] == tokenizer.eos_id:
-        ids = ids[:-1]
+    """Leave room for generation: ``[BOS] prompt [SEP]`` (no EOS)."""
+    p = tokenizer.encode(prompt, add_special=False)
+    ids = [tokenizer.bos_id] + p + [tokenizer.sep_id]
+    if len(ids) > max_len:
+        ids = ids[:max_len]
     return torch.tensor(ids[:max_len], dtype=torch.long)
+
+
+def completion_logprobs(
+    model: torch.nn.Module,
+    ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_len: int | torch.Tensor,
+) -> torch.Tensor:
+    """Sum of token log-probs on the response span only (after ``[SEP]``)."""
+    logits, _ = model(ids[:, :-1])
+    logp = torch.nn.functional.log_softmax(logits, dim=-1)
+    target = ids[:, 1:]
+    token_lp = logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
+    # target index t corresponds to ids[:, t+1]; keep tokens with position >= prompt_len
+    b, t = token_lp.shape
+    positions = torch.arange(1, t + 1, device=ids.device).unsqueeze(0).expand(b, -1)
+    if isinstance(prompt_len, int):
+        comp = positions >= prompt_len
+    else:
+        comp = positions >= prompt_len.unsqueeze(1)
+    pad = attention_mask[:, 1:].bool()
+    mask = comp & pad
+    return (token_lp * mask.float()).sum(dim=-1)
+
+
+def completion_logprob_mean(
+    model: torch.nn.Module,
+    ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    prompt_len: int | torch.Tensor,
+) -> torch.Tensor:
+    """Length-normalized completion log-prob."""
+    total = completion_logprobs(model, ids, attention_mask, prompt_len)
+    b, t = ids.shape[0], ids.shape[1] - 1
+    positions = torch.arange(1, t + 1, device=ids.device).unsqueeze(0).expand(b, -1)
+    if isinstance(prompt_len, int):
+        comp = positions >= prompt_len
+    else:
+        comp = positions >= prompt_len.unsqueeze(1)
+    n = (comp & attention_mask[:, 1:].bool()).float().sum(dim=-1).clamp_min(1.0)
+    return total / n
 
 
 def save_checkpoint(model: torch.nn.Module, path: Path) -> None:
