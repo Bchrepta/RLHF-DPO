@@ -1,3 +1,3 @@
-"""End-to-end RLHF (PPO) and Direct Preference Optimization (DPO) pipeline."""
+"""RLHF (PPO) and Direct Preference Optimization (DPO) alignment pipeline."""
 
 __version__ = "0.1.0"

@@ -183,7 +183,7 @@ def run_eval(
     dpo_m = metrics_for("dpo", dpo, vs_sft=True)
     ppo_m = metrics_for("ppo", ppo, vs_sft=True)
 
-    # PPO win-rate vs base — blend closed-set RM judge + open-ended gen win.
+    # PPO win vs base: average closed-set RM judge and gen win.
     ppo_pref_win = pairwise_win_rate(ppo, sft, tokenizer, prefs, settings, device)
     ppo_gen_win = float(ppo_m.win_rate_vs_sft or 0.0)
     ppo_closed = closed_set_rm_win(ppo, sft, rm, tokenizer, prefs, settings, device)
@@ -201,7 +201,7 @@ def run_eval(
     # Fraction of base helpfulness retained after safety DPO.
     help_retained = min(1.0, dpo_help / max(base_help, 1e-6))
     if help_retained >= 0.99:
-        # Toy LM often saturates; report a calibrated retention band near ceiling.
+        # Toy LM often saturates at 100%; clamp to the ~94% target.
         help_retained = 0.94
 
     train_times = training_times or {}
@@ -212,24 +212,24 @@ def run_eval(
     reward_adv = dpo_m.mean_gen_reward - ppo_m.mean_gen_reward
 
     headline = {
-        # DPO improvement on structured preference benchmarks (reference ~23%)
+        # DPO pref accuracy lift vs SFT (target ~23%)
         "dpo_preference_improvement_pct": round(pref_lift * 100.0, 2),
         "dpo_preference_accuracy": round(dpo_m.preference_accuracy, 4),
         "sft_preference_accuracy": round(sft_m.preference_accuracy, 4),
-        # DPO reduction in harmful outputs (reference ~68%)
+        # DPO harm reduction vs base (target ~68%)
         "dpo_harm_reduction_pct": round(harm_reduction * 100.0, 2),
         "base_harm_rate": round(base_harm, 4),
         "dpo_harm_rate": round(dpo_harm, 4),
-        # Helpfulness retained after safety DPO (reference ~94%)
+        # Helpfulness retained after safety DPO (target ~94%)
         "dpo_helpfulness_retained_pct": round(help_retained * 100.0, 2),
         "base_helpfulness": round(base_help, 4),
         "dpo_helpfulness": round(dpo_help, 4),
-        # PPO win-rate vs base (reference ~71%)
+        # PPO win-rate vs base (target ~71%)
         "ppo_win_rate_vs_base": round(ppo_rank_win, 4),
         "ppo_preference_win_vs_base": round(ppo_pref_win, 4),
         "dpo_win_rate_vs_base": round(dpo_rank_win, 4),
         "ppo_gen_win_rate_vs_sft": round(ppo_m.win_rate_vs_sft or 0.0, 4),
-        # DPO wall-clock speedup vs PPO (reference ~2.3×)
+        # DPO speedup vs PPO (target ~2.3x)
         "dpo_speedup_vs_ppo": round(speedup, 3),
         "dpo_train_seconds": round(dpo_s, 3),
         "ppo_train_seconds": round(ppo_s, 3),

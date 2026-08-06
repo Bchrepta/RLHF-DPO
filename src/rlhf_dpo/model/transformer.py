@@ -122,7 +122,7 @@ class CausalLM(nn.Module):
         target = idx[:, 1:]
         token_logp = logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
         if attention_mask is None:
-            # mask pad tokens if present as 0 — caller should pass mask
+            # mask pad tokens if present as 0; caller should pass mask
             return token_logp.sum(dim=-1)
         # attention_mask aligns with full idx; use positions 1:
         mask = attention_mask[:, 1:].float()

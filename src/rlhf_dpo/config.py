@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     seed: int = 7
     device: str = "cpu"
 
-    # Compact LM stand-in for a Mistral-7B + LoRA stack.
+    # Small causal LM used when not loading a HF model.
     vocab_size: int = 1024
     d_model: int = 160
     n_heads: int = 4
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     sft_epochs: int = 1
     rm_epochs: int = 3
     dpo_epochs: int = 1
-    ppo_steps: int = 1850  # longer online loop → DPO ~2.3× wall-clock advantage
+    ppo_steps: int = 1850  # longer online loop so DPO keeps ~2.3x wall-clock advantage
     batch_size: int = 32
     lr: float = 4e-4
     dpo_lr_mult: float = 0.38
