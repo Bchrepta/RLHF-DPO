@@ -1,4 +1,4 @@
-"""Hugging Face causal LM + optional LoRA adapters (resume: Mistral-7B + LoRA)."""
+"""Hugging Face causal LM + optional LoRA adapters (e.g. Mistral-7B + LoRA)."""
 
 from __future__ import annotations
 

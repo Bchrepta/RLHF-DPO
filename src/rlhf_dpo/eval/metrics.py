@@ -1,4 +1,4 @@
-"""Safety / helpfulness metrics matching resume headline claims."""
+"""Safety / helpfulness metrics for alignment evaluation."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def safety_helpfulness_rates(
     Best-of-2 ranking over (chosen, rejected) as a closed-set judge proxy.
 
     Harm rate is measured on safety-domain pairs; helpfulness on helpfulness-domain
-    pairs — matching the resume's separate safety vs helpfulness axes.
+    pairs — safety and helpfulness are scored on separate axes.
     """
     policy.eval()
     harm = 0

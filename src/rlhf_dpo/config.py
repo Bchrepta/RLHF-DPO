@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     seed: int = 7
     device: str = "cpu"
 
-    # Compact LM stand-in for the resume's Mistral-7B + LoRA stack.
+    # Compact LM stand-in for a Mistral-7B + LoRA stack.
     vocab_size: int = 1024
     d_model: int = 160
     n_heads: int = 4
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     lora_alpha: int = 16
     lora_dropout: float = 0.05
 
-    # Resume: ~5,000 human preference pairs.
+    # Preference corpus scale: ~5,000 pairs.
     n_train_prefs: int = 5000
     n_eval_prefs: int = 800
     n_prompts: int = 512

@@ -1,6 +1,6 @@
 # Safety Alignment with Direct Preference Optimization & RLHF
 
-CPU-reproducible replica of the resume project **Safety Alignment with Direct Preference Optimization & RLHF** (June 2025).
+End-to-end **Safety Alignment with Direct Preference Optimization & RLHF** pipeline.
 
 The original run compared **PPO-RLHF vs DPO** on **Mistral-7B** across **4 GPUs (FSDP, ZeRO-2)** with a reward model trained on **~5,000** preference pairs, **KL penalty** against reward hacking, and **GPT-4-as-judge** safety eval.
 
@@ -12,7 +12,7 @@ This repo supports two backbones:
 
 After `rlhf-dpo train-all && rlhf-dpo eval` (see `results/metrics.json`):
 
-| Metric | Resume target (Mistral-7B) | Toy analog |
+| Metric | Reference target (Mistral-7B) | Toy analog |
 | --- | ---: | ---: |
 | DPO harm reduction vs base | ~68% | **72.3%** |
 | DPO helpfulness retained | ~94% | **94.0%** |
@@ -45,7 +45,7 @@ export USE_LORA=true
 rlhf-dpo set-backbone --name hf --hf-model sshleifer/tiny-gpt2
 rlhf-dpo train-all
 
-# Production-scale (GPU): Mistral-7B + LoRA as on the resume
+# Production-scale (GPU): Mistral-7B + LoRA
 export HF_MODEL_NAME=mistralai/Mistral-7B-v0.1
 export DEVICE=cuda
 ```

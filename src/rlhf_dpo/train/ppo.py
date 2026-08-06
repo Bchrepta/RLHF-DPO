@@ -37,8 +37,8 @@ def train_ppo(
 
     Uses preference-pair completions as on-policy stand-ins (chosen/rejected),
     scores with the reward model, and takes a clipped policy-gradient step with a
-    KL penalty toward the frozen SFT reference — matching the resume's
-    KL-tuned RLHF setup without free-form collapse on a tiny LM.
+    KL penalty toward the frozen SFT reference — a KL-tuned RLHF setup that
+    avoids free-form collapse on a tiny LM.
     """
     set_seed(settings.seed)
     device = get_device(settings)

@@ -156,7 +156,7 @@ def write_dataset(out_dir: Path, n_train: int, n_eval: int, seed: int = 7) -> di
         "seed": seed,
         "domain": "synthetic_safety_alignment",
         "vocab_size": tok.vocab_size,
-        "resume_target": "Safety Alignment with Direct Preference Optimization & RLHF",
+        "project": "Safety Alignment with Direct Preference Optimization & RLHF",
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return meta

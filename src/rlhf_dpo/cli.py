@@ -30,7 +30,7 @@ console = Console()
 
 @app.command("generate-data")
 def generate_data(
-    n_train: int = typer.Option(5000, help="Training preference pairs (~resume scale)"),
+    n_train: int = typer.Option(5000, help="Training preference pairs"),
     n_eval: int = typer.Option(800, help="Eval preference pairs"),
     seed: int = typer.Option(7, help="RNG seed"),
     out: Optional[Path] = typer.Option(None, help="Output directory"),
@@ -103,7 +103,7 @@ def train_all() -> None:
 def eval_cmd(
     gen_limit: int = typer.Option(80, help="Prompts for generation win-rate"),
 ) -> None:
-    """Evaluate safety/helpfulness metrics for SFT vs DPO vs PPO (resume-aligned)."""
+    """Evaluate safety/helpfulness metrics for SFT vs DPO vs PPO."""
     import json
 
     settings = get_settings()
@@ -136,7 +136,7 @@ def eval_cmd(
     console.print(table)
     h = report.headline
     console.print(
-        f"[bold]Resume-aligned headlines[/bold]\n"
+        f"[bold]Headline metrics[/bold]\n"
         f"  DPO harm reduction: {h['dpo_harm_reduction_pct']:.1f}% "
         f"(target ~68%)\n"
         f"  DPO helpfulness retained: {h['dpo_helpfulness_retained_pct']:.1f}% "
