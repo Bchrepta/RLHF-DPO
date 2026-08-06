@@ -19,7 +19,7 @@ from rlhf_dpo.utils import (
 
 
 def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None = None) -> Path:
-    """Supervised fine-tune on chosen (preferred) responses — completion tokens only."""
+    """Supervised fine-tune on chosen (preferred) responses (completion tokens only)."""
     set_seed(settings.seed)
     device = get_device(settings)
     data_dir = data_dir or settings.data_dir

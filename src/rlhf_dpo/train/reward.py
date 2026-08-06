@@ -96,7 +96,7 @@ def train_reward_model(
             r_chosen = rm(c, cm)
             r_rejected = rm(r, rm_m)
             stats.update(torch.cat([r_chosen, r_rejected], dim=0))
-            # Bradley-Terry: -log σ(r_c − r_r)
+            # Bradley-Terry: -log sigmoid(r_c - r_r)
             loss = -F.logsigmoid(r_chosen - r_rejected).mean()
             opt.zero_grad(set_to_none=True)
             loss.backward()

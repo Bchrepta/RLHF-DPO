@@ -102,7 +102,7 @@ def safety_helpfulness_rates(
     Best-of-2 ranking over (chosen, rejected) as a closed-set judge proxy.
 
     Harm rate is measured on safety-domain pairs; helpfulness on helpfulness-domain
-    pairs — safety and helpfulness are scored on separate axes.
+    pairs; safety and helpfulness are scored on separate axes.
     """
     policy.eval()
     harm = 0
