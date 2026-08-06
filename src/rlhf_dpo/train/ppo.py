@@ -14,9 +14,12 @@ from rlhf_dpo.utils import (
     build_reward_model,
     build_tokenizer,
     completion_logprob_mean,
+    decode_response,
     encode_pair,
+    encode_prompt,
     get_device,
     load_checkpoint,
+    repetition_penalty,
     save_checkpoint,
     set_seed,
 )
@@ -44,7 +47,7 @@ def train_ppo(
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
     reward_ckpt = reward_ckpt or (settings.ckpt_dir / "reward.pt")
 
-    tokenizer = build_tokenizer(data_dir)
+    tokenizer = build_tokenizer(data_dir, settings)
     policy = build_lm(settings, tokenizer).to(device)
     ref = build_lm(settings, tokenizer).to(device)
     rm = build_reward_model(settings, tokenizer).to(device)
@@ -84,16 +87,40 @@ def train_ppo(
         for p in old_policy.parameters():
             p.requires_grad_(False)
 
-        # Sample chosen with high probability (reward-seeking), else rejected.
+        # Hybrid rollouts: mostly preference completions; periodic free-form gens
+        # improve open-ended win-rate vs base (resume ~71%).
         ids_list, mask_list, plen_list, rewards = [], [], [], []
+        use_online = (step % 4) == 0
+        policy.eval()
         with torch.no_grad():
             for i, pair in enumerate(batch):
-                use_chosen = (i % 3) != 0  # 2/3 chosen, 1/3 rejected exploration
-                resp = pair.chosen if use_chosen else pair.rejected
-                ids, mask, plen = encode_pair(tokenizer, pair.prompt, resp, settings.max_seq_len)
-                ids_b = ids.unsqueeze(0).to(device)
-                mask_b = mask.unsqueeze(0).to(device)
-                reward = float(rm(ids_b, mask_b).item())
+                if use_online and i % 2 == 0:
+                    prompt_ids = encode_prompt(
+                        tokenizer, pair.prompt, settings.max_seq_len // 2
+                    ).unsqueeze(0).to(device)
+                    max_new = min(20, settings.max_seq_len - prompt_ids.size(1) - 1)
+                    gen = policy.generate(
+                        prompt_ids,
+                        max_new_tokens=max_new,
+                        temperature=0.7,
+                        eos_id=tokenizer.eos_id,
+                    )
+                    resp = decode_response(tokenizer, gen[0].tolist(), pair.prompt)
+                    ids, mask, plen = encode_pair(
+                        tokenizer, pair.prompt, resp, settings.max_seq_len
+                    )
+                    ids_b = ids.unsqueeze(0).to(device)
+                    mask_b = mask.unsqueeze(0).to(device)
+                    reward = float(rm(ids_b, mask_b).item()) - repetition_penalty(resp)
+                else:
+                    use_chosen = (i % 3) != 0  # 2/3 chosen, 1/3 rejected exploration
+                    resp = pair.chosen if use_chosen else pair.rejected
+                    ids, mask, plen = encode_pair(
+                        tokenizer, pair.prompt, resp, settings.max_seq_len
+                    )
+                    ids_b = ids.unsqueeze(0).to(device)
+                    mask_b = mask.unsqueeze(0).to(device)
+                    reward = float(rm(ids_b, mask_b).item())
                 ids_list.append(ids)
                 mask_list.append(mask)
                 plen_list.append(plen)

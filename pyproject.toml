@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.4"]
+hf = ["transformers>=4.40", "peft>=0.11", "accelerate>=0.30"]
 
 [project.scripts]
 rlhf-dpo = "rlhf_dpo.cli:app"

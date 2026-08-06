@@ -25,10 +25,10 @@ def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None
     data_dir = data_dir or settings.data_dir
     out = out or (settings.ckpt_dir / "sft.pt")
 
-    tokenizer = build_tokenizer(data_dir)
+    tokenizer = build_tokenizer(data_dir, settings)
     model = build_lm(settings, tokenizer).to(device)
     prefs = load_prefs(data_dir / "train_prefs.json")
-        # Underfit SFT with a help-heavy mix so the base still errs on safety
+    # Underfit SFT with a help-heavy mix so the base still errs on safety
     # (higher harm rate) while staying strong enough for ~23% DPO pref lift.
     rng = __import__("random").Random(settings.seed)
     prefs = list(prefs)

@@ -136,7 +136,7 @@ def run_eval(
     data_dir = data_dir or settings.data_dir
     ckpt_dir = ckpt_dir or settings.ckpt_dir
     device = get_device(settings)
-    tokenizer = build_tokenizer(data_dir)
+    tokenizer = build_tokenizer(data_dir, settings)
     prefs = load_prefs(data_dir / "eval_prefs.json")
     prompts = json.loads((data_dir / "prompts.json").read_text(encoding="utf-8"))
 

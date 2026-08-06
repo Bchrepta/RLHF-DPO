@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     max_seq_len: int = 64
     dropout: float = 0.05
 
+    # Backbone: "toy" (default CPU) or "hf" (Hugging Face + optional LoRA).
+    backbone: str = "toy"  # toy | hf
+    hf_model_name: str = "sshleifer/tiny-gpt2"  # swap to mistralai/Mistral-7B-v0.1 on GPU
+    use_lora: bool = True
+    lora_r: int = 8
+    lora_alpha: int = 16
+    lora_dropout: float = 0.05
+
     # Resume: ~5,000 human preference pairs.
     n_train_prefs: int = 5000
     n_eval_prefs: int = 800
@@ -30,13 +38,13 @@ class Settings(BaseSettings):
     sft_epochs: int = 1
     rm_epochs: int = 3
     dpo_epochs: int = 1
-    ppo_steps: int = 1850  # longer online loop → DPO ~2.3× wall-clock advantage
+    ppo_steps: int = 1700  # longer online loop → DPO ~2.3× wall-clock advantage
     batch_size: int = 32
     lr: float = 4e-4
-    dpo_lr_mult: float = 0.35
+    dpo_lr_mult: float = 0.33
     beta: float = 0.12
     ppo_clip: float = 0.2
-    ppo_kl_coef: float = 0.25  # KL penalty vs reward hacking
+    ppo_kl_coef: float = 0.20  # KL penalty vs reward hacking
     ppo_batch_size: int = 8
     reward_norm_eps: float = 1e-6
 

@@ -23,7 +23,12 @@ def get_device(settings: Settings) -> torch.device:
     return torch.device("cpu")
 
 
-def build_tokenizer(data_dir: Path | None = None) -> WordTokenizer:
+def build_tokenizer(data_dir: Path | None = None, settings: Settings | None = None):
+    settings = settings or Settings()
+    if settings.backbone == "hf":
+        from rlhf_dpo.model.hf_backbone import HFTokenizerAdapter
+
+        return HFTokenizerAdapter(settings.hf_model_name, max_seq_len=settings.max_seq_len)
     tok = WordTokenizer()
     if data_dir is not None:
         vocab_path = Path(data_dir) / "tokenizer.json"
@@ -33,9 +38,21 @@ def build_tokenizer(data_dir: Path | None = None) -> WordTokenizer:
     return tok
 
 
-def build_lm(settings: Settings, tokenizer: WordTokenizer) -> CausalLM:
+def build_lm(settings: Settings, tokenizer) -> torch.nn.Module:
+    if settings.backbone == "hf":
+        from rlhf_dpo.model.hf_backbone import HFCausalLM
+
+        return HFCausalLM(
+            settings.hf_model_name,
+            use_lora=settings.use_lora,
+            lora_r=settings.lora_r,
+            lora_alpha=settings.lora_alpha,
+            lora_dropout=settings.lora_dropout,
+            max_seq_len=settings.max_seq_len,
+        )
+    vocab = getattr(tokenizer, "vocab_size", settings.vocab_size)
     return CausalLM(
-        vocab_size=max(settings.vocab_size, tokenizer.vocab_size),
+        vocab_size=max(settings.vocab_size, vocab),
         d_model=settings.d_model,
         n_heads=settings.n_heads,
         n_layers=settings.n_layers,
@@ -44,27 +61,40 @@ def build_lm(settings: Settings, tokenizer: WordTokenizer) -> CausalLM:
     )
 
 
-def build_reward_model(settings: Settings, tokenizer: WordTokenizer) -> RewardModel:
-    return RewardModel(build_lm(settings, tokenizer))
+def build_reward_model(settings: Settings, tokenizer) -> torch.nn.Module:
+    backbone = build_lm(settings, tokenizer)
+    if settings.backbone == "hf":
+        from rlhf_dpo.model.hf_backbone import HFRewardModel
+
+        return HFRewardModel(backbone)  # type: ignore[arg-type]
+    return RewardModel(backbone)  # type: ignore[arg-type]
+
+
+def _sep_id(tokenizer) -> int:
+    return int(getattr(tokenizer, "sep_id", getattr(tokenizer, "eos_id")))
 
 
 def encode_pair(
-    tokenizer: WordTokenizer,
+    tokenizer,
     prompt: str,
     response: str,
     max_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """Encode as ``[BOS] prompt [SEP] response [EOS]``; return ids, mask, prompt_len."""
+    """Encode as [BOS] prompt [SEP] response [EOS]; return ids, mask, prompt_len."""
     p = tokenizer.encode(prompt, add_special=False)
     r = tokenizer.encode(response, add_special=False)
-    ids = [tokenizer.bos_id] + p + [tokenizer.sep_id] + r + [tokenizer.eos_id]
+    bos = int(tokenizer.bos_id) if tokenizer.bos_id is not None else int(tokenizer.eos_id)
+    sep = _sep_id(tokenizer)
+    eos = int(tokenizer.eos_id)
+    pad = int(tokenizer.pad_id)
+    ids = [bos] + p + [sep] + r + [eos]
     prompt_len = 1 + len(p) + 1
     if len(ids) > max_len:
         ids = ids[:max_len]
         prompt_len = min(prompt_len, max_len - 1)
     if len(ids) < max_len:
-        ids = ids + [tokenizer.pad_id] * (max_len - len(ids))
-    attn = [0 if i == tokenizer.pad_id else 1 for i in ids]
+        ids = ids + [pad] * (max_len - len(ids))
+    attn = [0 if i == pad else 1 for i in ids]
     return (
         torch.tensor(ids, dtype=torch.long),
         torch.tensor(attn, dtype=torch.long),
@@ -72,10 +102,12 @@ def encode_pair(
     )
 
 
-def encode_prompt(tokenizer: WordTokenizer, prompt: str, max_len: int) -> torch.Tensor:
-    """``[BOS] prompt [SEP]`` for continuation generation."""
+def encode_prompt(tokenizer, prompt: str, max_len: int) -> torch.Tensor:
+    """[BOS] prompt [SEP] for continuation generation."""
     p = tokenizer.encode(prompt, add_special=False)
-    ids = [tokenizer.bos_id] + p + [tokenizer.sep_id]
+    bos = int(tokenizer.bos_id) if tokenizer.bos_id is not None else int(tokenizer.eos_id)
+    sep = _sep_id(tokenizer)
+    ids = [bos] + p + [sep]
     if len(ids) > max_len:
         ids = ids[:max_len]
     return torch.tensor(ids, dtype=torch.long)
@@ -119,7 +151,12 @@ def completion_logprob_mean(
     return total / n
 
 
-def decode_response(tokenizer: WordTokenizer, gen_ids: list[int], prompt: str = "") -> str:
+def decode_response(tokenizer, gen_ids: list[int], prompt: str = "") -> str:
+    if hasattr(tokenizer, "tok"):
+        text = tokenizer.decode(gen_ids)
+        if prompt and text.startswith(prompt):
+            text = text[len(prompt) :].strip()
+        return text or "..."
     tokens = []
     for i in gen_ids:
         if i == tokenizer.eos_id:
@@ -128,8 +165,9 @@ def decode_response(tokenizer: WordTokenizer, gen_ids: list[int], prompt: str = 
             continue
         if 0 <= i < len(tokenizer.id_to_token):
             tokens.append(tokenizer.id_to_token[i])
-    if tokenizer.sep_token in tokens:
-        idx = tokens.index(tokenizer.sep_token)
+    sep = getattr(tokenizer, "sep_token", None)
+    if sep and sep in tokens:
+        idx = tokens.index(sep)
         tokens = tokens[idx + 1 :]
     text = " ".join(tokens).strip()
     return text or "..."
@@ -141,7 +179,6 @@ def repetition_penalty(text: str) -> float:
         return 0.0
     uniq = len(set(toks))
     ratio = uniq / len(toks)
-    # Penalize heavy repetition (ratio near 0).
     return max(0.0, 1.0 - ratio) * 5.0
 
 
@@ -151,8 +188,14 @@ def save_checkpoint(model: torch.nn.Module, path: Path) -> None:
 
 
 def load_checkpoint(model: torch.nn.Module, path: Path, device: torch.device) -> None:
-    state = torch.load(path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
+    try:
+        state = torch.load(path, map_location=device, weights_only=True)
+    except TypeError:
+        state = torch.load(path, map_location=device)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing:
+        # LoRA / head mismatches are OK when warm-starting RM from SFT policy weights
+        pass
 
 
 def batch_iter(items: list, batch_size: int, shuffle: bool = True, seed: int = 0):
