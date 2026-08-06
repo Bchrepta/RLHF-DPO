@@ -59,7 +59,7 @@ def train_dpo(
     ref.eval()
 
     prefs = load_prefs(data_dir / "train_prefs.json")
-    # Upweight safety pairs so DPO cuts harm harder (resume ~68% reduction).
+    # Upweight safety pairs so DPO cuts harm harder (target ~68% reduction).
     safety = [p for p in prefs if getattr(p, "domain", "") == "safety"]
     prefs = list(prefs) + safety
     opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * getattr(settings, "dpo_lr_mult", 0.25))
