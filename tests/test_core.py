@@ -75,7 +75,7 @@ def test_write_dataset_and_encode(tmp_path: Path):
 
 
 def test_tiny_train_smoke():
-    """End-to-end smoke: tiny data, 1 epoch each stage, eval runs."""
+    """Smoke test: tiny data, 1 epoch each stage, eval runs."""
     from rlhf_dpo.train.dpo import train_dpo
     from rlhf_dpo.train.ppo import train_ppo
     from rlhf_dpo.train.reward import train_reward_model
