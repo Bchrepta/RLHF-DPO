@@ -1,0 +1,47 @@
+{
+  "n_eval": 400,
+  "sft": {
+    "name": "sft",
+    "preference_accuracy": 0.8325,
+    "mean_gen_reward": 10.429287767410278,
+    "win_rate_vs_sft": null,
+    "mean_kl_to_sft": null,
+    "notes": []
+  },
+  "reward_model_pair_acc": 0.8925,
+  "dpo": {
+    "name": "dpo",
+    "preference_accuracy": 0.93,
+    "mean_gen_reward": 12.290208260218302,
+    "win_rate_vs_sft": 0.8666666666666667,
+    "mean_kl_to_sft": -0.1097463180621465,
+    "notes": []
+  },
+  "ppo": {
+    "name": "ppo",
+    "preference_accuracy": 0.8375,
+    "mean_gen_reward": 10.973091451327006,
+    "win_rate_vs_sft": 0.6333333333333333,
+    "mean_kl_to_sft": -1.9760502676169078,
+    "notes": []
+  },
+  "dpo_vs_ppo_reward_advantage": 1.3171168088912957,
+  "dpo_compute_note": "DPO is a single-stage classification objective (no online sampling / critic); PPO-RLHF requires reward model + on-policy rollouts + clipped policy-gradient updates.",
+  "wall_clock_seconds": {
+    "sft": 1.2283246517181396,
+    "dpo": 1.8421382904052734,
+    "ppo": 1.8654537200927734
+  },
+  "headline": {
+    "dpo_preference_accuracy": 0.93,
+    "sft_preference_accuracy": 0.8325,
+    "dpo_relative_pref_lift_vs_sft": 0.1171,
+    "dpo_win_rate_vs_sft": 0.8667,
+    "ppo_win_rate_vs_sft": 0.6333,
+    "reward_model_pair_accuracy": 0.8925,
+    "dpo_mean_gen_reward": 12.2902,
+    "ppo_mean_gen_reward": 10.9731,
+    "sft_mean_gen_reward": 10.4293,
+    "dpo_vs_ppo_reward_delta": 1.3171
+  }
+}

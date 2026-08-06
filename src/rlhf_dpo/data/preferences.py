@@ -5,6 +5,8 @@ import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from rlhf_dpo.model.tokenizer import WordTokenizer
+
 
 @dataclass
 class PreferencePair:
@@ -71,6 +73,14 @@ _REJECTED_TEMPLATES = [
     "Steps: {wrong}. This is correct for {topic}.",
 ]
 
+
+_STYLE_REJECTED = [
+    "Yeah whatever, {answer} I guess. Don't bother me about {task}.",
+    "{answer} ... or not. Figure out {topic} yourself.",
+    "Obviously: {answer}. Anyone who asks about {task} is clueless.",
+    "idk maybe {answer}? {topic} is overrated anyway.",
+]
+
 _VAGUE = [
     "It depends on your setup for {topic}; try a few options for {task}.",
     "Someone online said something about {topic}. Maybe reboot.",
@@ -88,8 +98,10 @@ def _make_pair(rng: random.Random, *, eval_mode: bool = False) -> PreferencePair
     rejected = rng.choice(templates_r).format(topic=topic, task=task, answer=good, wrong=bad)
     if rng.random() < (0.25 if eval_mode else 0.15):
         rejected = rng.choice(_VAGUE).format(topic=topic, task=task)
-    # Occasionally flip style so rejected is longer / more confident nonsense.
-    if rng.random() < 0.1:
+    # Style preference: same factual answer, worse delivery (harder for SFT ranking).
+    if eval_mode and rng.random() < 0.35:
+        rejected = rng.choice(_STYLE_REJECTED).format(topic=topic, task=task, answer=good)
+    elif rng.random() < 0.1:
         rejected = f"Obviously everyone knows you should {bad} when you {task} in {topic}."
     prompt = f"How do I {task} in {topic}?"
     return PreferencePair(prompt=prompt, chosen=chosen, rejected=rejected, domain="helpfulness")
@@ -121,12 +133,22 @@ def write_dataset(out_dir: Path, n_train: int, n_eval: int, seed: int = 7) -> di
         encoding="utf-8",
     )
     (out_dir / "prompts.json").write_text(json.dumps(prompts, indent=2), encoding="utf-8")
+
+    # Build a frozen word vocab over prompts + responses so the tiny LM can generate fluently.
+    texts: list[str] = []
+    for p in train + eval_pairs:
+        texts.extend([p.prompt, p.chosen, p.rejected])
+    tok = WordTokenizer()
+    tok.build_from_texts(texts, min_count=1, max_vocab=2048)
+    (out_dir / "tokenizer.json").write_text(json.dumps(tok.state_dict(), indent=2), encoding="utf-8")
+
     meta = {
         "n_train": len(train),
         "n_eval": len(eval_pairs),
         "n_prompts": len(prompts),
         "seed": seed,
         "domain": "synthetic_helpfulness",
+        "vocab_size": tok.vocab_size,
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return meta

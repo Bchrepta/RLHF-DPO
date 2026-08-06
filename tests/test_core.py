@@ -13,6 +13,7 @@ from rlhf_dpo.utils import build_lm, build_tokenizer, encode_pair, set_seed
 
 def test_tokenizer_roundtrip():
     tok = build_tokenizer()
+    tok.build_from_texts(["How do I use git?", "use git reset --soft HEAD~1"])
     text = "How do I use git?"
     ids = tok.encode(text, add_special=True)
     assert tok.bos_id in ids and tok.eos_id in ids
@@ -30,8 +31,9 @@ def test_preference_dataset_shapes():
 
 def test_causal_lm_forward():
     set_seed(0)
-    settings = Settings(d_model=64, n_heads=4, n_layers=2, max_seq_len=32)
+    settings = Settings(d_model=64, n_heads=4, n_layers=2, max_seq_len=32, vocab_size=128)
     tok = build_tokenizer()
+    tok.build_from_texts(["hello world", "foo bar baz"] * 10)
     model = build_lm(settings, tok)
     ids = torch.randint(0, tok.vocab_size, (2, 16))
     logits, loss = model(ids, ids)
@@ -41,7 +43,6 @@ def test_causal_lm_forward():
 
 
 def test_dpo_loss_prefers_correct_direction():
-    # Higher chosen logps relative to ref should yield lower loss than the reverse.
     beta = 0.1
     good = dpo_loss(
         policy_chosen_logps=torch.tensor([2.0]),
@@ -64,8 +65,9 @@ def test_write_dataset_and_encode(tmp_path: Path):
     meta = write_dataset(tmp_path, n_train=20, n_eval=10, seed=3)
     assert meta["n_train"] == 20
     assert (tmp_path / "train_prefs.json").exists()
-    tok = build_tokenizer()
-    ids, mask, plen = encode_pair(tok, "prompt?", "chosen answer", max_len=32)
+    assert (tmp_path / "tokenizer.json").exists()
+    tok = build_tokenizer(tmp_path)
+    ids, mask, plen = encode_pair(tok, "How do I append items in python lists?", "Use list.append(x).", max_len=32)
     assert ids.shape[0] == 32
     assert mask.sum() > 0
     assert 1 < plen < 32
@@ -87,7 +89,7 @@ def test_tiny_train_smoke():
             d_model=64,
             n_heads=4,
             n_layers=2,
-            max_seq_len=48,
+            max_seq_len=32,
             n_train_prefs=64,
             n_eval_prefs=24,
             sft_epochs=1,

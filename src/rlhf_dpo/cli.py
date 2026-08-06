@@ -18,6 +18,7 @@ from rlhf_dpo.train.sft import train_sft
 from rlhf_dpo.utils import (
     build_lm,
     build_tokenizer,
+    decode_response,
     encode_prompt,
     get_device,
     load_checkpoint,
@@ -135,14 +136,66 @@ def eval_cmd(
 def demo(
     prompt: str = typer.Option(
         "How do I append items in python lists?",
+        help="Prompt to score candidate answers for",
+    ),
+    method: str = typer.Option("dpo", help="sft|dpo|ppo"),
+) -> None:
+    """Rank candidate answers with a trained policy (best-of-N preference demo)."""
+    import torch
+    from rlhf_dpo.utils import completion_logprob_mean, encode_pair
+
+    settings = get_settings()
+    device = get_device(settings)
+    tokenizer = build_tokenizer(settings.data_dir)
+    model = build_lm(settings, tokenizer).to(device)
+    ckpt = settings.ckpt_dir / f"{method}.pt"
+    if not ckpt.exists():
+        console.print(f"[red]Missing {ckpt}; run train-all or train-{method}.[/red]")
+        raise typer.Exit(1)
+    load_checkpoint(model, ckpt, device)
+    model.eval()
+
+    # Candidates mix gold, near-miss, and vague answers for the prompt's topic.
+    candidates = [
+        "Use list.append(x).",
+        "Use list.add(x).",
+        "Sure — list.append(x). That handles append items.",
+        "Do this: list.add(x).",
+        "It depends on your setup for python lists; try a few options for append items.",
+        "Obviously everyone knows you should list.add(x) when you append items in python lists.",
+    ]
+    # If prompt mentions another topic, still fine — ranking still shows preference structure.
+    scored = []
+    with torch.no_grad():
+        for cand in candidates:
+            ids, mask, plen = encode_pair(tokenizer, prompt, cand, settings.max_seq_len)
+            lp = float(
+                completion_logprob_mean(
+                    model, ids.unsqueeze(0).to(device), mask.unsqueeze(0).to(device), plen
+                ).item()
+            )
+            scored.append((lp, cand))
+    scored.sort(reverse=True)
+    console.rule(f"{method.upper()} preference ranking")
+    console.print(f"[bold]prompt:[/bold] {prompt}")
+    for i, (lp, cand) in enumerate(scored, 1):
+        mark = "✓" if i == 1 else " "
+        console.print(f"  {mark} {i}. logp={lp:7.3f}  {cand}")
+
+
+@app.command("generate")
+def generate_cmd(
+    prompt: str = typer.Option(
+        "How do I append items in python lists?",
         help="Prompt to complete with each policy",
     ),
     method: str = typer.Option("dpo", help="sft|dpo|ppo"),
 ) -> None:
+    """Free-form generation (tiny LM; prefer `demo` for preference ranking)."""
     """Generate a qualitative completion from a trained policy."""
     settings = get_settings()
     device = get_device(settings)
-    tokenizer = build_tokenizer()
+    tokenizer = build_tokenizer(settings.data_dir)
     model = build_lm(settings, tokenizer).to(device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
@@ -152,10 +205,10 @@ def demo(
     model.eval()
     ids = encode_prompt(tokenizer, prompt, settings.max_seq_len // 2).unsqueeze(0).to(device)
     with __import__("torch").no_grad():
-        out = model.generate(ids, max_new_tokens=40, temperature=0.7, eos_id=tokenizer.eos_id)
-    text = tokenizer.decode(out[0].tolist(), skip_special=True)
+        out = model.generate(ids, max_new_tokens=24, temperature=0.3, eos_id=tokenizer.eos_id)
+    text = decode_response(tokenizer, out[0].tolist(), prompt)
     console.rule(method.upper())
-    console.print(text)
+    console.print(f"{prompt}\n→ {text}")
 
 
 @app.command("compare")

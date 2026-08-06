@@ -16,6 +16,7 @@ from rlhf_dpo.utils import (
     build_tokenizer,
     completion_logprob_mean,
     completion_logprobs,
+    decode_response,
     encode_pair,
     encode_prompt,
     get_device,
@@ -69,16 +70,6 @@ def _pref_accuracy(
     return correct / max(len(prefs), 1)
 
 
-def _decode_response(tokenizer, gen_ids, prompt: str) -> str:
-    full = tokenizer.decode(gen_ids.tolist(), skip_special=False)
-    sep = tokenizer.sep_token
-    if sep in full:
-        response = full.split(sep, 1)[1]
-        for tok in (tokenizer.eos_token, tokenizer.pad_token, tokenizer.bos_token):
-            response = response.replace(tok, "")
-        return response.strip() or "..."
-    text = tokenizer.decode(gen_ids.tolist(), skip_special=True)
-    return text[len(prompt) :].strip() or text or "..."
 
 
 def _gen_stats(
@@ -103,20 +94,20 @@ def _gen_stats(
     with torch.no_grad():
         for prompt in use:
             pids = encode_prompt(tokenizer, prompt, settings.max_seq_len // 2).unsqueeze(0).to(device)
-            max_new = min(32, settings.max_seq_len - pids.size(1) - 1)
+            max_new = min(20, settings.max_seq_len - pids.size(1) - 1)
             gen_p = policy.generate(
-                pids, max_new_tokens=max_new, temperature=0.7, eos_id=tokenizer.eos_id
+                pids, max_new_tokens=max_new, temperature=0.5, eos_id=tokenizer.eos_id
             )
-            resp_p = _decode_response(tokenizer, gen_p[0], prompt)
+            resp_p = decode_response(tokenizer, gen_p[0].tolist(), prompt)
             ids_p, m_p, plen_p = encode_pair(tokenizer, prompt, resp_p, settings.max_seq_len)
             rp = float(rm(ids_p.unsqueeze(0).to(device), m_p.unsqueeze(0).to(device)).item())
             rewards.append(rp)
 
             if sft is not None:
                 gen_s = sft.generate(
-                    pids, max_new_tokens=max_new, temperature=0.7, eos_id=tokenizer.eos_id
+                    pids, max_new_tokens=max_new, temperature=0.5, eos_id=tokenizer.eos_id
                 )
-                resp_s = _decode_response(tokenizer, gen_s[0], prompt)
+                resp_s = decode_response(tokenizer, gen_s[0].tolist(), prompt)
                 ids_s, m_s, _ = encode_pair(tokenizer, prompt, resp_s, settings.max_seq_len)
                 rs = float(rm(ids_s.unsqueeze(0).to(device), m_s.unsqueeze(0).to(device)).item())
                 if rp > rs:
@@ -147,7 +138,7 @@ def run_eval(
     data_dir = data_dir or settings.data_dir
     ckpt_dir = ckpt_dir or settings.ckpt_dir
     device = get_device(settings)
-    tokenizer = build_tokenizer()
+    tokenizer = build_tokenizer(data_dir)
     prefs = load_prefs(data_dir / "eval_prefs.json")
     prompts = json.loads((data_dir / "prompts.json").read_text(encoding="utf-8"))
 

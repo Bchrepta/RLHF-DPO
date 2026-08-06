@@ -33,7 +33,7 @@ def train_reward_model(
     out = out or (settings.ckpt_dir / "reward.pt")
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
 
-    tokenizer = build_tokenizer()
+    tokenizer = build_tokenizer(data_dir)
     rm = build_reward_model(settings, tokenizer).to(device)
     if sft_ckpt.exists():
         load_checkpoint(rm.backbone, sft_ckpt, device)

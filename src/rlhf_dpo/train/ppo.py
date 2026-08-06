@@ -13,10 +13,12 @@ from rlhf_dpo.utils import (
     build_reward_model,
     build_tokenizer,
     completion_logprobs,
+    decode_response,
     encode_pair,
     encode_prompt,
     get_device,
     load_checkpoint,
+    repetition_penalty,
     save_checkpoint,
     set_seed,
 )
@@ -42,7 +44,7 @@ def train_ppo(
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
     reward_ckpt = reward_ckpt or (settings.ckpt_dir / "reward.pt")
 
-    tokenizer = build_tokenizer()
+    tokenizer = build_tokenizer(data_dir)
     policy = build_lm(settings, tokenizer).to(device)
     ref = build_lm(settings, tokenizer).to(device)
     rm = build_reward_model(settings, tokenizer).to(device)
@@ -61,7 +63,7 @@ def train_ppo(
     rm.eval()
 
     prompts = json.loads((data_dir / "prompts.json").read_text(encoding="utf-8"))
-    opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * 0.5)
+    opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * 0.1)
 
     running_reward = 0.0
     running_kl = 0.0
@@ -80,29 +82,24 @@ def train_ppo(
         with torch.no_grad():
             for prompt in batch_prompts:
                 prompt_ids = encode_prompt(tokenizer, prompt, settings.max_seq_len // 2).unsqueeze(0).to(device)
-                max_new = min(32, settings.max_seq_len - prompt_ids.size(1) - 1)
+                max_new = min(20, settings.max_seq_len - prompt_ids.size(1) - 1)
                 gen = policy.generate(
                     prompt_ids,
                     max_new_tokens=max_new,
-                    temperature=0.9,
+                    temperature=0.8,
                     eos_id=tokenizer.eos_id,
                 )
-                # Decode only generated continuation after SEP.
-                full = tokenizer.decode(gen[0].tolist(), skip_special=False)
-                # Split on sep token text if present.
-                sep = tokenizer.sep_token
-                if sep in full:
-                    response = full.split(sep, 1)[1]
-                    response = response.replace(tokenizer.eos_token, "").replace(tokenizer.pad_token, "").strip()
-                else:
-                    response = tokenizer.decode(gen[0].tolist(), skip_special=True)
-                    response = response[len(prompt) :].strip()
-                if not response:
-                    response = "..."
+                response = decode_response(tokenizer, gen[0].tolist(), prompt)
                 ids, mask, plen = encode_pair(tokenizer, prompt, response, settings.max_seq_len)
                 ids_b = ids.unsqueeze(0).to(device)
                 mask_b = mask.unsqueeze(0).to(device)
-                reward = float(rm(ids_b, mask_b).item())
+                reward = float(rm(ids_b, mask_b).item()) - repetition_penalty(response)
+                # Mild length shaping: prefer 3–12 token answers (matches chosen style).
+                ntok = len(response.split())
+                if ntok < 3:
+                    reward -= 1.0
+                elif ntok > 16:
+                    reward -= 0.5 * (ntok - 16)
                 ids_list.append(ids)
                 mask_list.append(mask)
                 plen_list.append(plen)

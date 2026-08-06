@@ -48,7 +48,7 @@ def train_dpo(
     out = out or (settings.ckpt_dir / "dpo.pt")
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
 
-    tokenizer = build_tokenizer()
+    tokenizer = build_tokenizer(data_dir)
     policy = build_lm(settings, tokenizer).to(device)
     ref = build_lm(settings, tokenizer).to(device)
     if sft_ckpt.exists():
@@ -59,7 +59,7 @@ def train_dpo(
     ref.eval()
 
     prefs = load_prefs(data_dir / "train_prefs.json")
-    opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr)
+    opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * getattr(settings, "dpo_lr_mult", 0.25))
 
     policy.train()
     for epoch in range(settings.dpo_epochs):

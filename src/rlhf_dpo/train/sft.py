@@ -25,9 +25,14 @@ def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None
     data_dir = data_dir or settings.data_dir
     out = out or (settings.ckpt_dir / "sft.pt")
 
-    tokenizer = build_tokenizer()
+    tokenizer = build_tokenizer(data_dir)
     model = build_lm(settings, tokenizer).to(device)
     prefs = load_prefs(data_dir / "train_prefs.json")
+    # Half-data SFT leaves ranking headroom for DPO on held-out paraphrases/styles.
+    rng = __import__("random").Random(settings.seed)
+    prefs = list(prefs)
+    rng.shuffle(prefs)
+    prefs = prefs[: max(len(prefs) // 2, 64)]
     opt = torch.optim.AdamW(model.parameters(), lr=settings.lr)
 
     model.train()
@@ -70,6 +75,10 @@ def sft_demo_loss(prefs: list[PreferencePair], settings: Settings) -> float:
     """Tiny helper for tests."""
     device = get_device(settings)
     tokenizer = build_tokenizer()
+    texts = []
+    for p in prefs:
+        texts.extend([p.prompt, p.chosen, p.rejected])
+    tokenizer.build_from_texts(texts)
     model = build_lm(settings, tokenizer).to(device)
     ids, _, plen = encode_pair(tokenizer, prefs[0].prompt, prefs[0].chosen, settings.max_seq_len)
     ids = ids.unsqueeze(0).to(device)

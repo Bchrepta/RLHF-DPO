@@ -1,0 +1,8 @@
+{
+  "n_train": 2400,
+  "n_eval": 400,
+  "n_prompts": 30,
+  "seed": 7,
+  "domain": "synthetic_helpfulness",
+  "vocab_size": 469
+}

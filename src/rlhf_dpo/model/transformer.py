@@ -104,6 +104,10 @@ class CausalLM(nn.Module):
             idx_cond = idx[:, -self.max_seq_len :]
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] / max(temperature, 1e-6)
+            # Discourage immediate token repeats (common failure mode for tiny LMs).
+            if idx.size(1) > 0:
+                logits = logits.clone()
+                logits[0, idx[0, -1]] -= 5.0
             probs = F.softmax(logits, dim=-1)
             next_id = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, next_id], dim=1)

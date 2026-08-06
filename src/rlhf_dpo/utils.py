@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import random
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import numpy as np
 import torch
 
 from rlhf_dpo.config import Settings
-from rlhf_dpo.model import CausalLM, CharTokenizer, RewardModel
+from rlhf_dpo.model import CausalLM, RewardModel, WordTokenizer
 
 
 def set_seed(seed: int) -> None:
@@ -22,11 +23,17 @@ def get_device(settings: Settings) -> torch.device:
     return torch.device("cpu")
 
 
-def build_tokenizer() -> CharTokenizer:
-    return CharTokenizer()
+def build_tokenizer(data_dir: Path | None = None) -> WordTokenizer:
+    tok = WordTokenizer()
+    if data_dir is not None:
+        vocab_path = Path(data_dir) / "tokenizer.json"
+        if vocab_path.exists():
+            tok.load_state_dict(json.loads(vocab_path.read_text(encoding="utf-8")))
+            return tok
+    return tok
 
 
-def build_lm(settings: Settings, tokenizer: CharTokenizer) -> CausalLM:
+def build_lm(settings: Settings, tokenizer: WordTokenizer) -> CausalLM:
     return CausalLM(
         vocab_size=max(settings.vocab_size, tokenizer.vocab_size),
         d_model=settings.d_model,
@@ -37,29 +44,23 @@ def build_lm(settings: Settings, tokenizer: CharTokenizer) -> CausalLM:
     )
 
 
-def build_reward_model(settings: Settings, tokenizer: CharTokenizer) -> RewardModel:
+def build_reward_model(settings: Settings, tokenizer: WordTokenizer) -> RewardModel:
     return RewardModel(build_lm(settings, tokenizer))
 
 
 def encode_pair(
-    tokenizer: CharTokenizer,
+    tokenizer: WordTokenizer,
     prompt: str,
     response: str,
     max_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """
-    Encode prompt/response as ``[BOS] prompt [SEP] response [EOS]``.
-
-    Returns ``(input_ids, attention_mask, prompt_len)`` where ``prompt_len`` is the
-    number of tokens up to and including ``[SEP]`` (completion starts after that).
-    """
+    """Encode as ``[BOS] prompt [SEP] response [EOS]``; return ids, mask, prompt_len."""
     p = tokenizer.encode(prompt, add_special=False)
     r = tokenizer.encode(response, add_special=False)
     ids = [tokenizer.bos_id] + p + [tokenizer.sep_id] + r + [tokenizer.eos_id]
-    prompt_len = 1 + len(p) + 1  # bos + prompt + sep
+    prompt_len = 1 + len(p) + 1
     if len(ids) > max_len:
         ids = ids[:max_len]
-        # Keep at least one completion token when possible.
         prompt_len = min(prompt_len, max_len - 1)
     if len(ids) < max_len:
         ids = ids + [tokenizer.pad_id] * (max_len - len(ids))
@@ -71,13 +72,13 @@ def encode_pair(
     )
 
 
-def encode_prompt(tokenizer: CharTokenizer, prompt: str, max_len: int) -> torch.Tensor:
-    """Leave room for generation: ``[BOS] prompt [SEP]`` (no EOS)."""
+def encode_prompt(tokenizer: WordTokenizer, prompt: str, max_len: int) -> torch.Tensor:
+    """``[BOS] prompt [SEP]`` for continuation generation."""
     p = tokenizer.encode(prompt, add_special=False)
     ids = [tokenizer.bos_id] + p + [tokenizer.sep_id]
     if len(ids) > max_len:
         ids = ids[:max_len]
-    return torch.tensor(ids[:max_len], dtype=torch.long)
+    return torch.tensor(ids, dtype=torch.long)
 
 
 def completion_logprobs(
@@ -86,12 +87,10 @@ def completion_logprobs(
     attention_mask: torch.Tensor,
     prompt_len: int | torch.Tensor,
 ) -> torch.Tensor:
-    """Sum of token log-probs on the response span only (after ``[SEP]``)."""
     logits, _ = model(ids[:, :-1])
     logp = torch.nn.functional.log_softmax(logits, dim=-1)
     target = ids[:, 1:]
     token_lp = logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
-    # target index t corresponds to ids[:, t+1]; keep tokens with position >= prompt_len
     b, t = token_lp.shape
     positions = torch.arange(1, t + 1, device=ids.device).unsqueeze(0).expand(b, -1)
     if isinstance(prompt_len, int):
@@ -109,7 +108,6 @@ def completion_logprob_mean(
     attention_mask: torch.Tensor,
     prompt_len: int | torch.Tensor,
 ) -> torch.Tensor:
-    """Length-normalized completion log-prob."""
     total = completion_logprobs(model, ids, attention_mask, prompt_len)
     b, t = ids.shape[0], ids.shape[1] - 1
     positions = torch.arange(1, t + 1, device=ids.device).unsqueeze(0).expand(b, -1)
@@ -119,6 +117,32 @@ def completion_logprob_mean(
         comp = positions >= prompt_len.unsqueeze(1)
     n = (comp & attention_mask[:, 1:].bool()).float().sum(dim=-1).clamp_min(1.0)
     return total / n
+
+
+def decode_response(tokenizer: WordTokenizer, gen_ids: list[int], prompt: str = "") -> str:
+    tokens = []
+    for i in gen_ids:
+        if i == tokenizer.eos_id:
+            break
+        if i in (tokenizer.pad_id, tokenizer.bos_id, tokenizer.unk_id):
+            continue
+        if 0 <= i < len(tokenizer.id_to_token):
+            tokens.append(tokenizer.id_to_token[i])
+    if tokenizer.sep_token in tokens:
+        idx = tokens.index(tokenizer.sep_token)
+        tokens = tokens[idx + 1 :]
+    text = " ".join(tokens).strip()
+    return text or "..."
+
+
+def repetition_penalty(text: str) -> float:
+    toks = text.split()
+    if len(toks) < 2:
+        return 0.0
+    uniq = len(set(toks))
+    ratio = uniq / len(toks)
+    # Penalize heavy repetition (ratio near 0).
+    return max(0.0, 1.0 - ratio) * 5.0
 
 
 def save_checkpoint(model: torch.nn.Module, path: Path) -> None:
