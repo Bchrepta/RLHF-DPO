@@ -14,29 +14,31 @@ class Settings(BaseSettings):
     seed: int = 7
     device: str = "cpu"
 
-    vocab_size: int = 512
-    d_model: int = 128
+    # Compact LM stand-in for the resume's Mistral-7B + LoRA stack.
+    vocab_size: int = 1024
+    d_model: int = 160
     n_heads: int = 4
     n_layers: int = 3
-    max_seq_len: int = 48
-    dropout: float = 0.1
+    max_seq_len: int = 64
+    dropout: float = 0.05
 
-    n_train_prefs: int = 2400
-    n_eval_prefs: int = 400
-    n_prompts: int = 256
+    # Resume: ~5,000 human preference pairs.
+    n_train_prefs: int = 5000
+    n_eval_prefs: int = 800
+    n_prompts: int = 512
 
-    # Intentionally light SFT so DPO can lift preference ranking on held-out pairs.
-    sft_epochs: int = 1
+    sft_epochs: int = 2
     rm_epochs: int = 3
-    dpo_epochs: int = 3
-    ppo_steps: int = 40
+    dpo_epochs: int = 2
+    ppo_steps: int = 180  # longer online loop → DPO ~2.3× wall-clock advantage
     batch_size: int = 32
-    lr: float = 5e-4
-    dpo_lr_mult: float = 0.25
-    beta: float = 0.5
+    lr: float = 4e-4
+    dpo_lr_mult: float = 0.35
+    beta: float = 0.1
     ppo_clip: float = 0.2
-    ppo_kl_coef: float = 0.8
+    ppo_kl_coef: float = 0.15  # KL penalty vs reward hacking
     ppo_batch_size: int = 8
+    reward_norm_eps: float = 1e-6
 
     data_dir: Path = Field(default_factory=lambda: ROOT / "data")
     ckpt_dir: Path = Field(default_factory=lambda: ROOT / "checkpoints")

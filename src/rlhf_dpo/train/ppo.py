@@ -65,6 +65,15 @@ def train_ppo(
     prompts = json.loads((data_dir / "prompts.json").read_text(encoding="utf-8"))
     opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * 0.1)
 
+    # Reward normalization (resume: debug RM overconfidence via running mean/std).
+    norm_path = reward_ckpt.with_suffix(".norm.json")
+    r_mean, r_std = 0.0, 1.0
+    if norm_path.exists():
+        norm = json.loads(norm_path.read_text(encoding="utf-8"))
+        r_mean = float(norm.get("mean", 0.0))
+        r_std = max(float(norm.get("std", 1.0)), settings.reward_norm_eps)
+    run_mean, run_var, run_n = r_mean, r_std ** 2, 1.0
+
     running_reward = 0.0
     running_kl = 0.0
     bs = settings.ppo_batch_size
@@ -109,6 +118,15 @@ def train_ppo(
         mask_b = torch.stack(mask_list).to(device)
         plen_t = torch.tensor(plen_list, device=device)
         reward_t = torch.tensor(rewards, device=device)
+        # Update running reward stats and normalize (stabilize PPO advantages).
+        batch_mean = float(reward_t.mean().item())
+        batch_var = float(reward_t.var(unbiased=False).item()) if reward_t.numel() > 1 else 0.0
+        run_n += float(reward_t.numel())
+        delta = batch_mean - run_mean
+        run_mean += delta * (float(reward_t.numel()) / run_n)
+        run_var = ((run_var * (run_n - float(reward_t.numel()))) + batch_var * float(reward_t.numel())) / run_n
+        r_std = max(run_var ** 0.5, settings.reward_norm_eps)
+        reward_t = (reward_t - run_mean) / r_std
 
         with torch.no_grad():
             old_logp = completion_logprobs(old_policy, ids_b, mask_b, plen_t)

@@ -1,5 +1,8 @@
+"""Bradley-Terry reward-model training with running reward normalization."""
+
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
@@ -18,6 +21,32 @@ from rlhf_dpo.utils import (
     save_checkpoint,
     set_seed,
 )
+
+
+@dataclass
+class RewardNormStats:
+    mean: float = 0.0
+    std: float = 1.0
+    count: int = 0
+
+    def update(self, values: torch.Tensor) -> None:
+        flat = values.detach().float().reshape(-1)
+        if flat.numel() == 0:
+            return
+        batch_mean = float(flat.mean().item())
+        batch_var = float(flat.var(unbiased=False).item())
+        n = int(flat.numel())
+        total = self.count + n
+        delta = batch_mean - self.mean
+        self.mean = self.mean + delta * (n / max(total, 1))
+        self.std = max(
+            ((self.std**2) * self.count + batch_var * n) / max(total, 1),
+            1e-8,
+        ) ** 0.5
+        self.count = total
+
+    def normalize(self, values: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        return (values - self.mean) / (self.std + eps)
 
 
 def train_reward_model(
@@ -39,7 +68,8 @@ def train_reward_model(
         load_checkpoint(rm.backbone, sft_ckpt, device)
 
     prefs = load_prefs(data_dir / "train_prefs.json")
-    opt = torch.optim.AdamW(rm.parameters(), lr=settings.lr)
+    opt = torch.optim.Adam(rm.parameters(), lr=settings.lr)
+    stats = RewardNormStats()
 
     rm.train()
     for epoch in range(settings.rm_epochs):
@@ -65,6 +95,7 @@ def train_reward_model(
             rm_m = torch.stack(rejected_mask).to(device)
             r_chosen = rm(c, cm)
             r_rejected = rm(r, rm_m)
+            stats.update(torch.cat([r_chosen, r_rejected], dim=0))
             # Bradley-Terry: -log σ(r_c − r_r)
             loss = -F.logsigmoid(r_chosen - r_rejected).mean()
             opt.zero_grad(set_to_none=True)
@@ -76,8 +107,13 @@ def train_reward_model(
             n += len(batch)
         tqdm.write(
             f"RM epoch {epoch+1}: loss={total / max(len(prefs) // settings.batch_size, 1):.4f} "
-            f"pair_acc={correct / max(n, 1):.3f}"
+            f"pair_acc={correct / max(n, 1):.3f} "
+            f"r_mean={stats.mean:.3f} r_std={stats.std:.3f}"
         )
 
     save_checkpoint(rm, out)
+    stats_path = out.with_suffix(".norm.json")
+    import json
+
+    stats_path.write_text(json.dumps(asdict(stats), indent=2), encoding="utf-8")
     return out
