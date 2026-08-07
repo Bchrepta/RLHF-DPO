@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     seed: int = 7
-    device: str = "cpu"
+    device: str = "auto"  # auto|cpu|cuda
 
     # Small causal LM used when not loading a HF model.
     vocab_size: int = 1024
@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     lora_r: int = 8
     lora_alpha: int = 16
     lora_dropout: float = 0.05
+    # HF compute dtype on CUDA: float16 is much faster on RTX 30-series.
+    torch_dtype: str = "float16"  # float16|bfloat16|float32
 
     # Preference corpus scale: ~5,000 pairs.
     n_train_prefs: int = 5000

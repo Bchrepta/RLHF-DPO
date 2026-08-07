@@ -47,7 +47,18 @@ rlhf-dpo train-all
 
 # Production-scale (GPU): Mistral-7B + LoRA
 export HF_MODEL_NAME=mistralai/Mistral-7B-v0.1
-export DEVICE=cuda
+export DEVICE=cuda   # or DEVICE=auto (default picks CUDA when available)
+```
+
+PowerShell:
+
+```powershell
+$env:BACKBONE = "hf"
+$env:USE_LORA = "true"
+$env:DEVICE = "cuda"
+$env:HF_MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+$env:BATCH_SIZE = "2"
+rlhf-dpo train-all
 ```
 
 ## Pipeline
