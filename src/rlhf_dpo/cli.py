@@ -88,10 +88,8 @@ def train_all() -> None:
     )
     if device.type != "cuda":
         console.print(
-            "[yellow]Running on CPU. For your RTX 3080 set:[/yellow]
-"
-            "  $env:DEVICE = 'cuda'
-"
+            "[yellow]Running on CPU. For your RTX 3080 set:[/yellow]\n"
+            "  $env:DEVICE = 'cuda'\n"
             "or rely on DEVICE=auto (default) when CUDA is visible to this venv's torch."
         )
     if not (settings.data_dir / "train_prefs.json").exists():
