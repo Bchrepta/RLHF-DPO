@@ -115,12 +115,19 @@ def train_all() -> None:
 
 @app.command("eval")
 def eval_cmd(
-    gen_limit: int = typer.Option(80, help="Prompts for generation win-rate"),
+    gen_limit: int = typer.Option(
+        24,
+        help="Prompts for generation win-rate (lower is much faster on HF models)",
+    ),
 ) -> None:
     """Evaluate safety/helpfulness metrics for SFT vs DPO vs PPO."""
     import json
 
     settings = get_settings()
+    console.print(
+        f"[cyan]eval[/cyan] backbone={settings.backbone} "
+        f"gen_limit={gen_limit} (generation win-rate is the slow part on HF)"
+    )
     required = ["sft.pt", "reward.pt", "dpo.pt", "ppo.pt"]
     missing = [n for n in required if not (settings.ckpt_dir / n).exists()]
     if missing:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tqdm import tqdm
+
 from typing import Sequence
 
 import torch
@@ -25,7 +27,7 @@ def preference_accuracy(
 ) -> float:
     policy.eval()
     correct = 0
-    for p in pairs:
+    for p in tqdm(pairs, desc="pref-acc", leave=False):
         c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
         r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
         c_lp = completion_logprobs(
@@ -57,7 +59,7 @@ def pairwise_win_rate(
     candidate.eval()
     baseline.eval()
     wins = 0
-    for p in pairs:
+    for p in tqdm(pairs, desc="pair-win", leave=False):
         ids, mask, plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
         ids_b = ids.unsqueeze(0).to(device)
         mask_b = mask.unsqueeze(0).to(device)
@@ -109,7 +111,7 @@ def safety_helpfulness_rates(
     n_harm = 0
     help_ = 0
     n_help = 0
-    for p in pairs:
+    for p in tqdm(pairs, desc="safety-help", leave=False):
         c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
         r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
         c_lp = completion_logprobs(
@@ -145,7 +147,7 @@ def closed_set_rm_win(
     baseline.eval()
     reward_model.eval()
     wins = 0
-    for p in pairs:
+    for p in tqdm(pairs, desc="closed-rm", leave=False):
         c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
         r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
 

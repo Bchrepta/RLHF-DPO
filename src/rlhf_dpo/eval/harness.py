@@ -91,7 +91,7 @@ def _gen_stats(
     kl_vals: list[float] = []
     use = prompts[:limit]
     with torch.no_grad():
-        for prompt in use:
+        for prompt in tqdm(use, desc="gen-eval", leave=False):
             pids = encode_prompt(tokenizer, prompt, settings.max_seq_len // 2).unsqueeze(0).to(device)
             max_new = min(20, settings.max_seq_len - pids.size(1) - 1)
             gen_p = policy.generate(
@@ -157,11 +157,14 @@ def run_eval(
         load_checkpoint(rm, ckpt_dir / "reward.pt", device)
     rm.eval()
 
+    print(f"Eval device={device} backbone={settings.backbone} n_prefs={len(prefs)} gen_limit={gen_limit}")
+    print("Scoring reward-model pair accuracy...")
     rm_acc = _reward_model_pair_acc(rm, prefs, tokenizer, settings, device)
 
     wall: dict[str, float] = {}
 
     def metrics_for(name: str, model, vs_sft: bool) -> MethodMetrics:
+        print(f"Evaluating {name} (pref rank + gen win + safety/help)...")
         t0 = time.time()
         pref_acc = preference_accuracy(model, tokenizer, prefs, settings, device)
         mean_r, win, kl = _gen_stats(
