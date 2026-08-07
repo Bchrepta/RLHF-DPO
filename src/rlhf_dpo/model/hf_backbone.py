@@ -34,6 +34,7 @@ class HFCausalLM(nn.Module):
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
         max_seq_len: int = 128,
+        torch_dtype: str = "float16",
     ) -> None:
         super().__init__()
         _require_transformers()
@@ -45,7 +46,17 @@ class HFCausalLM(nn.Module):
         # Keep n_positions / max_position_embeddings aligned when possible
         if hasattr(config, "n_positions"):
             config.n_positions = max(getattr(config, "n_positions", max_seq_len), max_seq_len)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, config=config)
+        if not torch.cuda.is_available() or torch_dtype == "float32":
+            dtype = torch.float32
+        elif torch_dtype == "bfloat16":
+            dtype = torch.bfloat16
+        else:
+            dtype = torch.float16
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            config=config,
+            torch_dtype=dtype,
+        )
         self.hidden_size = int(getattr(config, "n_embd", getattr(config, "hidden_size", 768)))
         self.vocab_size = int(config.vocab_size)
 

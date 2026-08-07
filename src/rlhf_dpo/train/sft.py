@@ -22,6 +22,7 @@ def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None
     """Supervised fine-tune on chosen (preferred) responses (completion tokens only)."""
     set_seed(settings.seed)
     device = get_device(settings)
+    print(f"SFT device={device} backbone={settings.backbone} model={settings.hf_model_name if settings.backbone == 'hf' else 'toy'} batch={settings.batch_size}")
     data_dir = data_dir or settings.data_dir
     out = out or (settings.ckpt_dir / "sft.pt")
 

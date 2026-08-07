@@ -18,8 +18,12 @@ def set_seed(seed: int) -> None:
 
 
 def get_device(settings: Settings) -> torch.device:
-    if settings.device == "cuda" and torch.cuda.is_available():
+    """Resolve training device. `auto` picks CUDA when available."""
+    want = (settings.device or "auto").lower()
+    if want in {"cuda", "auto"} and torch.cuda.is_available():
         return torch.device("cuda")
+    if want == "cuda" and not torch.cuda.is_available():
+        print("DEVICE=cuda requested but CUDA is unavailable; falling back to CPU.")
     return torch.device("cpu")
 
 
@@ -49,6 +53,7 @@ def build_lm(settings: Settings, tokenizer) -> torch.nn.Module:
             lora_alpha=settings.lora_alpha,
             lora_dropout=settings.lora_dropout,
             max_seq_len=settings.max_seq_len,
+            torch_dtype=getattr(settings, "torch_dtype", "float16"),
         )
     vocab = getattr(tokenizer, "vocab_size", settings.vocab_size)
     return CausalLM(

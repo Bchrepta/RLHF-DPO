@@ -77,7 +77,23 @@ def train_all() -> None:
     import json
     import time
 
+    from rlhf_dpo.utils import get_device
+
     settings = get_settings()
+    device = get_device(settings)
+    console.print(
+        f"[bold]device={device}[/bold] backbone={settings.backbone} "
+        f"model={settings.hf_model_name if settings.backbone == 'hf' else 'toy'} "
+        f"batch={settings.batch_size} max_seq={settings.max_seq_len}"
+    )
+    if device.type != "cuda":
+        console.print(
+            "[yellow]Running on CPU. For your RTX 3080 set:[/yellow]
+"
+            "  $env:DEVICE = 'cuda'
+"
+            "or rely on DEVICE=auto (default) when CUDA is visible to this venv's torch."
+        )
     if not (settings.data_dir / "train_prefs.json").exists():
         write_dataset(settings.data_dir, settings.n_train_prefs, settings.n_eval_prefs, settings.seed)
         console.print("[cyan]Generated preference dataset[/cyan]")
