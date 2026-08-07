@@ -111,7 +111,7 @@ def safety_helpfulness_rates(
     n_harm = 0
     help_ = 0
     n_help = 0
-    for p in pairs:
+    for p in tqdm(pairs, desc="safety-help", leave=False):
         c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
         r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
         c_lp = completion_logprobs(
@@ -147,7 +147,7 @@ def closed_set_rm_win(
     baseline.eval()
     reward_model.eval()
     wins = 0
-    for p in pairs:
+    for p in tqdm(pairs, desc="closed-rm", leave=False):
         c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
         r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
 
