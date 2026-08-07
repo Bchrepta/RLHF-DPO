@@ -101,6 +101,11 @@ class HFCausalLM(nn.Module):
         self.eval()
         # Prefer HF generate for quality; keep a simple loop fallback.
         try:
+            # Avoid transformers warning: model generation_config often sets max_length=2048
+            # while we only want max_new_tokens.
+            gen_cfg = getattr(self.model, "generation_config", None)
+            if gen_cfg is not None and getattr(gen_cfg, "max_length", None) is not None:
+                gen_cfg.max_length = None
             gen = self.model.generate(
                 input_ids=idx,
                 max_new_tokens=max_new_tokens,
