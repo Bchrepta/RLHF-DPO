@@ -10,6 +10,7 @@ from rlhf_dpo.data.preferences import PreferencePair, load_prefs
 from rlhf_dpo.utils import (
     batch_iter,
     build_lm,
+    place_model,
     build_tokenizer,
     encode_pair,
     get_device,
@@ -22,12 +23,12 @@ def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None
     """Supervised fine-tune on chosen (preferred) responses (completion tokens only)."""
     set_seed(settings.seed)
     device = get_device(settings)
-    print(f"SFT device={device} backbone={settings.backbone} model={settings.hf_model_name if settings.backbone == 'hf' else 'toy'} batch={settings.batch_size}")
+    print(f"SFT device={device} backbone={settings.backbone} model={settings.hf_model_name if settings.backbone == 'hf' else 'toy'} batch={settings.batch_size} load_in_4bit={getattr(settings, 'load_in_4bit', False)}")
     data_dir = data_dir or settings.data_dir
     out = out or (settings.ckpt_dir / "sft.pt")
 
     tokenizer = build_tokenizer(data_dir, settings)
-    model = build_lm(settings, tokenizer).to(device)
+    model = place_model(build_lm(settings, tokenizer), device)
     prefs = load_prefs(data_dir / "train_prefs.json")
     # Underfit SFT with a help-heavy mix so the base still errs on safety
     # (higher harm rate) while staying strong enough for ~23% DPO pref lift.
@@ -42,7 +43,7 @@ def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None
     n_help = n - n_safe
     prefs = help_p[:n_help] + safe_p[:n_safe]
     rng.shuffle(prefs)
-    opt = torch.optim.AdamW(model.parameters(), lr=settings.lr)
+    opt = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=settings.lr)
 
     model.train()
     for epoch in range(settings.sft_epochs):
@@ -70,7 +71,7 @@ def train_sft(settings: Settings, data_dir: Path | None = None, out: Path | None
             _, loss = model(inputs, targets)
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], 1.0)
             opt.step()
             total += float(loss.item())
             n += 1
@@ -88,7 +89,7 @@ def sft_demo_loss(prefs: list[PreferencePair], settings: Settings) -> float:
     for p in prefs:
         texts.extend([p.prompt, p.chosen, p.rejected])
     tokenizer.build_from_texts(texts)
-    model = build_lm(settings, tokenizer).to(device)
+    model = place_model(build_lm(settings, tokenizer), device)
     ids, _, plen = encode_pair(tokenizer, prefs[0].prompt, prefs[0].chosen, settings.max_seq_len)
     ids = ids.unsqueeze(0).to(device)
     inputs = ids[:, :-1]

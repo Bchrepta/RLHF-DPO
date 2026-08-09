@@ -11,6 +11,7 @@ from rlhf_dpo.data.preferences import load_prefs
 from rlhf_dpo.utils import (
     batch_iter,
     build_lm,
+    place_model,
     build_tokenizer,
     completion_logprobs,
     encode_pair,
@@ -49,8 +50,8 @@ def train_dpo(
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
 
     tokenizer = build_tokenizer(data_dir, settings)
-    policy = build_lm(settings, tokenizer).to(device)
-    ref = build_lm(settings, tokenizer).to(device)
+    policy = place_model(build_lm(settings, tokenizer), device)
+    ref = place_model(build_lm(settings, tokenizer), device)
     if sft_ckpt.exists():
         load_checkpoint(policy, sft_ckpt, device)
         load_checkpoint(ref, sft_ckpt, device)
@@ -62,7 +63,7 @@ def train_dpo(
     # Upweight safety pairs so DPO cuts harm harder (target ~68% reduction).
     safety = [p for p in prefs if getattr(p, "domain", "") == "safety"]
     prefs = list(prefs) + safety
-    opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * getattr(settings, "dpo_lr_mult", 0.25))
+    opt = torch.optim.AdamW((p for p in policy.parameters() if p.requires_grad), lr=settings.lr * getattr(settings, "dpo_lr_mult", 0.25))
 
     policy.train()
     for epoch in range(settings.dpo_epochs):
@@ -100,7 +101,7 @@ def train_dpo(
             loss = dpo_loss(policy_c, policy_r, ref_c, ref_r, settings.beta)
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.requires_grad], 1.0)
             opt.step()
             total += float(loss.item())
             steps += 1

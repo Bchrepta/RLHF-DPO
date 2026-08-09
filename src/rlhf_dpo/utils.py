@@ -42,6 +42,35 @@ def build_tokenizer(data_dir: Path | None = None, settings: Settings | None = No
     return tok
 
 
+def is_quantized_module(model: torch.nn.Module) -> bool:
+    """True when the module (or nested HF backbone) uses bitsandbytes 4-bit weights."""
+    if getattr(model, "_quantized", False):
+        return True
+    backbone = getattr(model, "backbone", None)
+    if backbone is not None and getattr(backbone, "_quantized", False):
+        return True
+    return False
+
+
+def place_model(model: torch.nn.Module, device: torch.device) -> torch.nn.Module:
+    """
+    Move a model to device, skipping .to() for 4-bit modules (already device-mapped).
+
+    Reward heads on quantized backbones are still moved explicitly.
+    """
+    if is_quantized_module(model):
+        v_head = getattr(model, "v_head", None)
+        if v_head is not None:
+            model.v_head = v_head.to(device=device, dtype=torch.float32)
+        backbone = getattr(model, "backbone", None)
+        if backbone is not None:
+            bv = getattr(backbone, "v_head", None)
+            if bv is not None:
+                backbone.v_head = bv.to(device=device, dtype=torch.float32)
+        return model
+    return model.to(device)
+
+
 def build_lm(settings: Settings, tokenizer) -> torch.nn.Module:
     if settings.backbone == "hf":
         from rlhf_dpo.model.hf_backbone import HFCausalLM
@@ -54,6 +83,8 @@ def build_lm(settings: Settings, tokenizer) -> torch.nn.Module:
             lora_dropout=settings.lora_dropout,
             max_seq_len=settings.max_seq_len,
             torch_dtype=getattr(settings, "torch_dtype", "float16"),
+            load_in_4bit=bool(getattr(settings, "load_in_4bit", False)),
+            gradient_checkpointing=bool(getattr(settings, "gradient_checkpointing", False)),
         )
     vocab = getattr(tokenizer, "vocab_size", settings.vocab_size)
     return CausalLM(
@@ -188,7 +219,16 @@ def repetition_penalty(text: str) -> float:
 
 
 def save_checkpoint(model: torch.nn.Module, path: Path) -> None:
+    """Save full state_dict, or trainable-only weights for quantized/QLoRA models."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if is_quantized_module(model):
+        trainable = {
+            name: param.detach().cpu().clone()
+            for name, param in model.named_parameters()
+            if param.requires_grad
+        }
+        torch.save({"format": "trainable_only", "trainable": trainable}, path)
+        return
     torch.save(model.state_dict(), path)
 
 
@@ -197,7 +237,15 @@ def load_checkpoint(model: torch.nn.Module, path: Path, device: torch.device) ->
         state = torch.load(path, map_location=device, weights_only=True)
     except TypeError:
         state = torch.load(path, map_location=device)
-    missing, unexpected = model.load_state_dict(state, strict=False)
+
+    if isinstance(state, dict) and state.get("format") == "trainable_only":
+        current = model.state_dict()
+        for key, value in state.get("trainable", {}).items():
+            if key in current:
+                current[key] = value.to(device=current[key].device, dtype=current[key].dtype)
+        missing, unexpected = model.load_state_dict(current, strict=False)
+    else:
+        missing, unexpected = model.load_state_dict(state, strict=False)
     if missing:
         # LoRA / head mismatches are OK when warm-starting RM from SFT policy weights
         pass
