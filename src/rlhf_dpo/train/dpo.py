@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 
 import torch
@@ -111,4 +112,8 @@ def train_dpo(
 
 
     save_checkpoint(policy, out)
+    del ref
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return out

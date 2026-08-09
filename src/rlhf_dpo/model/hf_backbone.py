@@ -132,7 +132,12 @@ class HFCausalLM(nn.Module):
                 )
                 self.model = get_peft_model(self.model, lora)
                 self._lora = True
-            except Exception:
+            except Exception as exc:
+                if load_in_4bit:
+                    # Full finetune of a 4-bit base is not viable; surface the error.
+                    raise RuntimeError(
+                        f"Failed to attach LoRA for QLoRA ({type(exc).__name__}: {exc})"
+                    ) from exc
                 # Fall back to full fine-tune if peft/target modules mismatch
                 self._lora = False
 

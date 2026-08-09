@@ -325,8 +325,12 @@ def set_backbone(
         f"  export GRADIENT_CHECKPOINTING={str(gradient_checkpointing).lower()}"
     )
     console.print(
-        "PowerShell: $env:BACKBONE='hf'; $env:LOAD_IN_4BIT='true'; "
-        "$env:HF_MODEL_NAME='mistralai/Mistral-7B-v0.1'"
+        "PowerShell example (Mistral-7B QLoRA on a 3080):\n"
+        "  $env:BACKBONE='hf'; $env:USE_LORA='true'\n"
+        "  $env:LOAD_IN_4BIT='true'; $env:GRADIENT_CHECKPOINTING='true'\n"
+        "  $env:DEVICE='cuda'; $env:BATCH_SIZE='1'; $env:PPO_BATCH_SIZE='1'\n"
+        "  $env:MAX_SEQ_LEN='128'; $env:TORCH_DTYPE='float16'\n"
+        "  $env:HF_MODEL_NAME='mistralai/Mistral-7B-v0.1'"
     )
 
 
