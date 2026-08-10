@@ -113,10 +113,14 @@ def train_ppo(
         p.requires_grad_(False)
     ref.eval()
 
-    opt = torch.optim.AdamW(
-        (p for p in policy.parameters() if p.requires_grad),
-        lr=settings.lr * 0.08,
-    )
+    trainable = [p for p in policy.parameters() if p.requires_grad]
+    if not trainable:
+        raise RuntimeError("PPO: no trainable parameters (LoRA adapters missing?)")
+    ppo_lr = settings.lr * 0.08
+    if getattr(settings, "load_in_4bit", False):
+        ppo_lr = min(ppo_lr, 1e-5)
+    opt = torch.optim.AdamW(trainable, lr=ppo_lr)
+    print(f"PPO lr={ppo_lr:.2e} trainable_tensors={len(trainable)}")
 
     norm_path = reward_ckpt.with_suffix(".norm.json")
     r_mean, r_std = 0.0, 1.0
@@ -175,6 +179,11 @@ def train_ppo(
 
         policy.train()
         new_logp = completion_logprob_mean(policy, ids_b, mask_b, plen_t)
+        if not new_logp.requires_grad:
+            raise RuntimeError(
+                "PPO: policy logprobs have no grad (enable_input_require_grads / "
+                "gradient checkpointing). Try GRADIENT_CHECKPOINTING=false or update peft."
+            )
         kl = (new_logp - ref_logp).clamp(-2.0, 2.0)
         shaped = reward_t - settings.ppo_kl_coef * kl.detach()
         advantage = shaped - shaped.mean()
@@ -187,7 +196,7 @@ def train_ppo(
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.requires_grad], 0.5)
+        torch.nn.utils.clip_grad_norm_(trainable, 0.5)
         opt.step()
 
         running_reward = 0.9 * running_reward + 0.1 * float(reward_t.mean().item())

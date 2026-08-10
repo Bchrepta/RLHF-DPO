@@ -31,6 +31,11 @@ def dpo_loss(
     beta: float,
 ) -> torch.Tensor:
     """Standard DPO loss (Rafailov et al., 2023)."""
+    # Keep the preference margin math in fp32 for QLoRA stability.
+    policy_chosen_logps = policy_chosen_logps.float()
+    policy_rejected_logps = policy_rejected_logps.float()
+    ref_chosen_logps = ref_chosen_logps.float()
+    ref_rejected_logps = ref_rejected_logps.float()
     pi_logratios = policy_chosen_logps - policy_rejected_logps
     ref_logratios = ref_chosen_logps - ref_rejected_logps
     logits = beta * (pi_logratios - ref_logratios)
@@ -64,7 +69,15 @@ def train_dpo(
     # Upweight safety pairs so DPO cuts harm harder (target ~68% reduction).
     safety = [p for p in prefs if getattr(p, "domain", "") == "safety"]
     prefs = list(prefs) + safety
-    opt = torch.optim.AdamW((p for p in policy.parameters() if p.requires_grad), lr=settings.lr * getattr(settings, "dpo_lr_mult", 0.25))
+    dpo_lr = settings.lr * getattr(settings, "dpo_lr_mult", 0.25)
+    if getattr(settings, "load_in_4bit", False):
+        # QLoRA is much more sensitive; keep updates small.
+        dpo_lr = min(dpo_lr, 2e-5)
+    trainable = [p for p in policy.parameters() if p.requires_grad]
+    if not trainable:
+        raise RuntimeError("DPO: no trainable parameters (LoRA adapters missing?)")
+    opt = torch.optim.AdamW(trainable, lr=dpo_lr)
+    print(f"DPO lr={dpo_lr:.2e} trainable_tensors={len(trainable)} load_in_4bit={getattr(settings, 'load_in_4bit', False)}")
 
     policy.train()
     for epoch in range(settings.dpo_epochs):
@@ -100,9 +113,12 @@ def train_dpo(
                 ref_r = completion_logprobs(ref, r, rm, rp)
 
             loss = dpo_loss(policy_c, policy_r, ref_c, ref_r, settings.beta)
+            if not torch.isfinite(loss):
+                tqdm.write(f"DPO skip non-finite loss={float(loss.detach().cpu())}")
+                continue
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.requires_grad], 1.0)
+            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step()
             total += float(loss.item())
             steps += 1
