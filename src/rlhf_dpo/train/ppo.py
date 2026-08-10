@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import copy
+import gc
 import json
 from pathlib import Path
 
@@ -14,15 +14,45 @@ from rlhf_dpo.utils import (
     build_reward_model,
     build_tokenizer,
     completion_logprob_mean,
-    decode_response,
     encode_pair,
-    encode_prompt,
     get_device,
+    is_quantized_module,
     load_checkpoint,
-    repetition_penalty,
+    place_model,
     save_checkpoint,
     set_seed,
 )
+
+
+def _precompute_pref_rewards(
+    settings: Settings,
+    tokenizer,
+    prefs,
+    reward_ckpt: Path,
+    device: torch.device,
+) -> list[tuple[float, float]]:
+    """Score chosen/rejected once, then free the reward model (VRAM-friendly for QLoRA)."""
+    rm = place_model(build_reward_model(settings, tokenizer), device)
+    if reward_ckpt.exists():
+        load_checkpoint(rm, reward_ckpt, device)
+    rm.eval()
+    for p in rm.parameters():
+        p.requires_grad_(False)
+
+    scored: list[tuple[float, float]] = []
+    with torch.no_grad():
+        for pair in tqdm(prefs, desc="ppo-cache-rewards", leave=False):
+            c_ids, c_mask, _ = encode_pair(tokenizer, pair.prompt, pair.chosen, settings.max_seq_len)
+            r_ids, r_mask, _ = encode_pair(tokenizer, pair.prompt, pair.rejected, settings.max_seq_len)
+            rc = float(rm(c_ids.unsqueeze(0).to(device), c_mask.unsqueeze(0).to(device)).item())
+            rr = float(rm(r_ids.unsqueeze(0).to(device), r_mask.unsqueeze(0).to(device)).item())
+            scored.append((rc, rr))
+
+    del rm
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    return scored
 
 
 def train_ppo(
@@ -48,25 +78,45 @@ def train_ppo(
     reward_ckpt = reward_ckpt or (settings.ckpt_dir / "reward.pt")
 
     tokenizer = build_tokenizer(data_dir, settings)
-    policy = build_lm(settings, tokenizer).to(device)
-    ref = build_lm(settings, tokenizer).to(device)
-    rm = build_reward_model(settings, tokenizer).to(device)
+    prefs = load_prefs(data_dir / "train_prefs.json")
+
+    # For QLoRA / large HF models, cache RM scores first so PPO only keeps policy+ref in VRAM.
+    # (Avoids 3x Mistral-7B-4bit copies, which will not fit a 10GB 3080.)
+    probe = place_model(build_lm(settings, tokenizer), device)
+    use_reward_cache = bool(getattr(settings, "load_in_4bit", False)) or is_quantized_module(probe)
+    del probe
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    reward_cache: list[tuple[float, float]] | None = None
+    rm = None
+    if use_reward_cache:
+        print("PPO: caching reward-model scores then freeing RM (QLoRA/VRAM mode)")
+        reward_cache = _precompute_pref_rewards(settings, tokenizer, prefs, reward_ckpt, device)
+    else:
+        rm = place_model(build_reward_model(settings, tokenizer), device)
+        if reward_ckpt.exists():
+            load_checkpoint(rm, reward_ckpt, device)
+        for p in rm.parameters():
+            p.requires_grad_(False)
+        rm.eval()
+
+    policy = place_model(build_lm(settings, tokenizer), device)
+    ref = place_model(build_lm(settings, tokenizer), device)
 
     if sft_ckpt.exists():
         load_checkpoint(policy, sft_ckpt, device)
         load_checkpoint(ref, sft_ckpt, device)
-    if reward_ckpt.exists():
-        load_checkpoint(rm, reward_ckpt, device)
 
     for p in ref.parameters():
         p.requires_grad_(False)
-    for p in rm.parameters():
-        p.requires_grad_(False)
     ref.eval()
-    rm.eval()
 
-    prefs = load_prefs(data_dir / "train_prefs.json")
-    opt = torch.optim.AdamW(policy.parameters(), lr=settings.lr * 0.08)
+    opt = torch.optim.AdamW(
+        (p for p in policy.parameters() if p.requires_grad),
+        lr=settings.lr * 0.08,
+    )
 
     norm_path = reward_ckpt.with_suffix(".norm.json")
     r_mean, r_std = 0.0, 1.0
@@ -80,23 +130,24 @@ def train_ppo(
     running_kl = 0.0
     bs = settings.ppo_batch_size
     for step in tqdm(range(settings.ppo_steps), desc="ppo"):
-        batch = [prefs[(step * bs + i) % len(prefs)] for i in range(bs)]
-
-        old_policy = copy.deepcopy(policy)
-        old_policy.eval()
-        for p in old_policy.parameters():
-            p.requires_grad_(False)
+        batch_idxs = [((step * bs + i) % len(prefs)) for i in range(bs)]
+        batch = [prefs[i] for i in batch_idxs]
 
         # Preference-pair rollouts (chosen-heavy) with KL to SFT reference.
         ids_list, mask_list, plen_list, rewards = [], [], [], []
         with torch.no_grad():
-            for i, pair in enumerate(batch):
+            for i, (pair, pref_i) in enumerate(zip(batch, batch_idxs)):
                 use_chosen = (i % 3) != 0
                 resp = pair.chosen if use_chosen else pair.rejected
                 ids, mask, plen = encode_pair(tokenizer, pair.prompt, resp, settings.max_seq_len)
                 ids_b = ids.unsqueeze(0).to(device)
                 mask_b = mask.unsqueeze(0).to(device)
-                reward = float(rm(ids_b, mask_b).item())
+                if reward_cache is not None:
+                    rc, rr = reward_cache[pref_i]
+                    reward = rc if use_chosen else rr
+                else:
+                    assert rm is not None
+                    reward = float(rm(ids_b, mask_b).item())
                 ids_list.append(ids)
                 mask_list.append(mask)
                 plen_list.append(plen)
@@ -117,8 +168,9 @@ def train_ppo(
         r_std = max(run_var ** 0.5, settings.reward_norm_eps)
         reward_t = (reward_t - run_mean) / r_std
 
+        # old_logp from current weights (no deepcopy — required for quantized models)
         with torch.no_grad():
-            old_logp = completion_logprob_mean(old_policy, ids_b, mask_b, plen_t)
+            old_logp = completion_logprob_mean(policy, ids_b, mask_b, plen_t)
             ref_logp = completion_logprob_mean(ref, ids_b, mask_b, plen_t)
 
         policy.train()
@@ -135,7 +187,7 @@ def train_ppo(
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_([p for p in policy.parameters() if p.requires_grad], 0.5)
         opt.step()
 
         running_reward = 0.9 * running_reward + 0.1 * float(reward_t.mean().item())

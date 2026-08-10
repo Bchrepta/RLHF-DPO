@@ -1,12 +1,12 @@
 # Safety Alignment with Direct Preference Optimization & RLHF
 
-PPO-RLHF and DPO for safety alignment, with a CPU toy LM and an optional Hugging Face + LoRA path.
+PPO-RLHF and DPO for safety alignment, with a CPU toy LM and an optional Hugging Face + LoRA / QLoRA path.
 
 The production setup compared PPO-RLHF vs DPO on Mistral-7B across 4 GPUs (FSDP, ZeRO-2), with a reward model trained on ~5,000 preference pairs, a KL penalty against reward hacking, and GPT-4-as-judge safety eval.
 
 This repo supports two backbones:
 - **`toy`** (default): compact causal LM for laptop CPU
-- **`hf`**: Hugging Face causal LM + optional **LoRA** (PEFT); default `sshleifer/tiny-gpt2`, swap to `mistralai/Mistral-7B-v0.1` on GPU
+- **`hf`**: Hugging Face causal LM + optional **LoRA / QLoRA** (PEFT + bitsandbytes); default `sshleifer/tiny-gpt2`, or `mistralai/Mistral-7B-v0.1` with `LOAD_IN_4BIT=true` on a 3080
 
 ## Results
 
@@ -51,33 +51,51 @@ rlhf-dpo eval
 rlhf-dpo demo-safety --method dpo
 ```
 
-## Hugging Face + LoRA backbone
+## Hugging Face + LoRA / QLoRA backbone
 
 ```bash
-pip install -r requirements-hf.txt   # or: pip install -e '.[hf]'
+pip install -r requirements-hf.txt   # transformers, peft, accelerate, bitsandbytes
+# or: pip install -e '.[qlora]'
 
 # Tiny GPT-2 smoke path (CPU-friendly)
 export BACKBONE=hf
 export HF_MODEL_NAME=sshleifer/tiny-gpt2
 export USE_LORA=true
-rlhf-dpo set-backbone --name hf --hf-model sshleifer/tiny-gpt2
 rlhf-dpo train-all
-
-# Larger models (single 3080 usually needs 4-bit / QLoRA; not wired yet)
-export HF_MODEL_NAME=mistralai/Mistral-7B-v0.1
-export DEVICE=cuda   # or DEVICE=auto (default picks CUDA when available)
 ```
+
+### QLoRA on a single RTX 3080 (Mistral-7B)
+
+4-bit base weights + LoRA adapters. Accept the model license / run `huggingface-cli login` if gated.
 
 PowerShell:
 
 ```powershell
+pip install -e ".[qlora]"
+
 $env:BACKBONE = "hf"
 $env:USE_LORA = "true"
+$env:LOAD_IN_4BIT = "true"
+$env:GRADIENT_CHECKPOINTING = "true"
 $env:DEVICE = "cuda"
-$env:HF_MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-$env:BATCH_SIZE = "2"
+$env:HF_MODEL_NAME = "mistralai/Mistral-7B-v0.1"
+$env:BATCH_SIZE = "1"
+$env:PPO_BATCH_SIZE = "1"
+$env:MAX_SEQ_LEN = "128"
+$env:TORCH_DTYPE = "float16"
+
+# Fresh checkpoints when switching models
+Remove-Item -Recurse -Force checkpoints -ErrorAction SilentlyContinue
+
+rlhf-dpo generate-data --n-train 5000 --n-eval 800
 rlhf-dpo train-all
+rlhf-dpo eval --gen-limit 12
+rlhf-dpo demo-safety --method dpo
 ```
+
+Notes:
+- PPO caches reward-model scores then frees the RM so only policy + reference stay in VRAM.
+- If you still OOM, keep batch size 1 or use TinyLlama fp16 LoRA for faster iteration.
 
 ## Pipeline
 

@@ -20,6 +20,7 @@ from rlhf_dpo.eval.metrics import (
 )
 from rlhf_dpo.utils import (
     build_lm,
+    place_model,
     build_reward_model,
     build_tokenizer,
     completion_logprob_mean,
@@ -142,7 +143,7 @@ def run_eval(
     prompts = json.loads((data_dir / "prompts.json").read_text(encoding="utf-8"))
 
     def load_policy(name: str):
-        m = build_lm(settings, tokenizer).to(device)
+        m = place_model(build_lm(settings, tokenizer), device)
         path = ckpt_dir / name
         if path.exists():
             load_checkpoint(m, path, device)
@@ -152,7 +153,7 @@ def run_eval(
     sft = load_policy("sft.pt")
     dpo = load_policy("dpo.pt")
     ppo = load_policy("ppo.pt")
-    rm = build_reward_model(settings, tokenizer).to(device)
+    rm = place_model(build_reward_model(settings, tokenizer), device)
     if (ckpt_dir / "reward.pt").exists():
         load_checkpoint(rm, ckpt_dir / "reward.pt", device)
     rm.eval()

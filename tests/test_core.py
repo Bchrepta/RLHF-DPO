@@ -139,3 +139,21 @@ def test_hf_backbone_optional():
     logits, loss = model(ids.unsqueeze(0), ids.unsqueeze(0))
     assert logits.shape[0] == 1
     assert loss is not None
+
+
+
+def test_qlora_flags_default_off():
+    settings = Settings()
+    assert settings.load_in_4bit is False
+    assert settings.gradient_checkpointing is False
+
+
+def test_place_model_cpu_toy():
+    from rlhf_dpo.utils import place_model
+
+    settings = Settings(d_model=64, n_heads=4, n_layers=2, max_seq_len=32, vocab_size=128)
+    tok = build_tokenizer()
+    tok.build_from_texts(["hello world"] * 5)
+    model = build_lm(settings, tok)
+    placed = place_model(model, torch.device("cpu"))
+    assert next(placed.parameters()).device.type == "cpu"

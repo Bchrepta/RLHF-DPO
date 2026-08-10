@@ -14,6 +14,7 @@ from rlhf_dpo.data.preferences import load_prefs
 from rlhf_dpo.utils import (
     batch_iter,
     build_reward_model,
+    place_model,
     build_tokenizer,
     encode_pair,
     get_device,
@@ -63,12 +64,12 @@ def train_reward_model(
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
 
     tokenizer = build_tokenizer(data_dir, settings)
-    rm = build_reward_model(settings, tokenizer).to(device)
+    rm = place_model(build_reward_model(settings, tokenizer), device)
     if sft_ckpt.exists():
         load_checkpoint(rm.backbone, sft_ckpt, device)
 
     prefs = load_prefs(data_dir / "train_prefs.json")
-    opt = torch.optim.Adam(rm.parameters(), lr=settings.lr)
+    opt = torch.optim.Adam((p for p in rm.parameters() if p.requires_grad), lr=settings.lr)
     stats = RewardNormStats()
 
     rm.train()
@@ -100,7 +101,7 @@ def train_reward_model(
             loss = -F.logsigmoid(r_chosen - r_rejected).mean()
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(rm.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_([p for p in rm.parameters() if p.requires_grad], 1.0)
             opt.step()
             total += float(loss.item())
             correct += int((r_chosen > r_rejected).sum().item())

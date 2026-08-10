@@ -1,4 +1,4 @@
-"""Hugging Face causal LM + optional LoRA adapters (e.g. Mistral-7B + LoRA)."""
+"""Hugging Face causal LM + optional LoRA / QLoRA adapters (e.g. Mistral-7B)."""
 
 from __future__ import annotations
 
@@ -15,8 +15,26 @@ def _require_transformers():
     except ImportError as exc:
         raise ImportError(
             "Hugging Face backbone requires extras: pip install 'rlhf-dpo[hf]' "
-            "(transformers, peft)."
+            "(transformers, peft, accelerate)."
         ) from exc
+
+
+def _require_bitsandbytes():
+    try:
+        import bitsandbytes  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "4-bit / QLoRA requires bitsandbytes: pip install 'rlhf-dpo[qlora]' "
+            "or pip install bitsandbytes"
+        ) from exc
+
+
+def _resolve_dtype(torch_dtype: str) -> torch.dtype:
+    if not torch.cuda.is_available() or torch_dtype == "float32":
+        return torch.float32
+    if torch_dtype == "bfloat16":
+        return torch.bfloat16
+    return torch.float16
 
 
 class HFCausalLM(nn.Module):
@@ -35,6 +53,8 @@ class HFCausalLM(nn.Module):
         lora_dropout: float = 0.05,
         max_seq_len: int = 128,
         torch_dtype: str = "float16",
+        load_in_4bit: bool = False,
+        gradient_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         _require_transformers()
@@ -42,30 +62,66 @@ class HFCausalLM(nn.Module):
 
         self.model_name = model_name
         self.max_seq_len = max_seq_len
+        self._quantized = bool(load_in_4bit)
+        self._lora = False
+
         config = AutoConfig.from_pretrained(model_name)
         # Keep n_positions / max_position_embeddings aligned when possible
         if hasattr(config, "n_positions"):
             config.n_positions = max(getattr(config, "n_positions", max_seq_len), max_seq_len)
-        if not torch.cuda.is_available() or torch_dtype == "float32":
-            dtype = torch.float32
-        elif torch_dtype == "bfloat16":
-            dtype = torch.bfloat16
+
+        load_kwargs: dict[str, Any] = {"config": config}
+        if load_in_4bit:
+            if not torch.cuda.is_available():
+                raise RuntimeError("LOAD_IN_4BIT / QLoRA requires a CUDA GPU.")
+            _require_bitsandbytes()
+            from transformers import BitsAndBytesConfig
+
+            # compute_dtype: fp16 on RTX 30-series; bf16 on Ampere+ data-center GPUs if requested
+            compute = _resolve_dtype(torch_dtype)
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=compute,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            )
+            load_kwargs["device_map"] = {"": 0}
         else:
-            dtype = torch.float16
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            config=config,
-            torch_dtype=dtype,
-        )
+            load_kwargs["torch_dtype"] = _resolve_dtype(torch_dtype)
+
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
         self.hidden_size = int(getattr(config, "n_embd", getattr(config, "hidden_size", 768)))
         self.vocab_size = int(config.vocab_size)
+
+        if gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable()
+            if hasattr(self.model, "config"):
+                self.model.config.use_cache = False
 
         if use_lora:
             try:
                 from peft import LoraConfig, TaskType, get_peft_model
 
-                # GPT-2 style + Llama/Mistral style target modules
-                targets = ["c_attn", "c_proj", "q_proj", "k_proj", "v_proj", "o_proj"]
+                if load_in_4bit:
+                    from peft import prepare_model_for_kbit_training
+
+                    self.model = prepare_model_for_kbit_training(
+                        self.model,
+                        use_gradient_checkpointing=gradient_checkpointing,
+                    )
+
+                # GPT-2 style + Llama/Mistral attention (+ optional MLP) targets
+                targets = [
+                    "c_attn",
+                    "c_proj",
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "gate_proj",
+                    "up_proj",
+                    "down_proj",
+                ]
                 lora = LoraConfig(
                     task_type=TaskType.CAUSAL_LM,
                     r=lora_r,
@@ -76,11 +132,14 @@ class HFCausalLM(nn.Module):
                 )
                 self.model = get_peft_model(self.model, lora)
                 self._lora = True
-            except Exception:
+            except Exception as exc:
+                if load_in_4bit:
+                    # Full finetune of a 4-bit base is not viable; surface the error.
+                    raise RuntimeError(
+                        f"Failed to attach LoRA for QLoRA ({type(exc).__name__}: {exc})"
+                    ) from exc
                 # Fall back to full fine-tune if peft/target modules mismatch
                 self._lora = False
-        else:
-            self._lora = False
 
     def forward(
         self, idx: torch.Tensor, targets: torch.Tensor | None = None
@@ -144,7 +203,8 @@ class HFRewardModel(nn.Module):
     def __init__(self, backbone: HFCausalLM) -> None:
         super().__init__()
         self.backbone = backbone
-        self.v_head = nn.Linear(backbone.hidden_size, 1)
+        # Keep the value head in fp32 even when the backbone is 4-bit / fp16.
+        self.v_head = nn.Linear(backbone.hidden_size, 1).float()
 
     def _base(self) -> Any:
         m = self.backbone.model
@@ -170,7 +230,7 @@ class HFRewardModel(nn.Module):
         else:
             mask = attention_mask.unsqueeze(-1).float()
             pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
-        return self.v_head(pooled).squeeze(-1)
+        return self.v_head(pooled.float()).squeeze(-1)
 
 
 class HFTokenizerAdapter:

@@ -17,6 +17,7 @@ from rlhf_dpo.train.reward import train_reward_model
 from rlhf_dpo.train.sft import train_sft
 from rlhf_dpo.utils import (
     build_lm,
+    place_model,
     build_tokenizer,
     decode_response,
     encode_prompt,
@@ -84,7 +85,7 @@ def train_all() -> None:
     console.print(
         f"[bold]device={device}[/bold] backbone={settings.backbone} "
         f"model={settings.hf_model_name if settings.backbone == 'hf' else 'toy'} "
-        f"batch={settings.batch_size} max_seq={settings.max_seq_len}"
+        f"batch={settings.batch_size} max_seq={settings.max_seq_len} load_in_4bit={getattr(settings, 'load_in_4bit', False)}"
     )
     if device.type != "cuda":
         console.print(
@@ -187,7 +188,7 @@ def demo(
     settings = get_settings()
     device = get_device(settings)
     tokenizer = build_tokenizer(settings.data_dir, settings)
-    model = build_lm(settings, tokenizer).to(device)
+    model = place_model(build_lm(settings, tokenizer), device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
         console.print(f"[red]Missing {ckpt}; run train-all or train-{method}.[/red]")
@@ -235,7 +236,7 @@ def generate_cmd(
     settings = get_settings()
     device = get_device(settings)
     tokenizer = build_tokenizer(settings.data_dir, settings)
-    model = build_lm(settings, tokenizer).to(device)
+    model = place_model(build_lm(settings, tokenizer), device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
         console.print(f"[red]Missing {ckpt}; run train-all or train-{method}[/red]")
@@ -273,7 +274,7 @@ def demo_safety(
     settings = get_settings()
     device = get_device(settings)
     tokenizer = build_tokenizer(settings.data_dir, settings)
-    model = build_lm(settings, tokenizer).to(device)
+    model = place_model(build_lm(settings, tokenizer), device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
         console.print(f"[red]Missing {ckpt}; run train-all or train-{method}.[/red]")
@@ -311,17 +312,25 @@ def set_backbone(
     name: str = typer.Option("toy", help="toy | hf"),
     hf_model: str = typer.Option("sshleifer/tiny-gpt2", help="HF model id when name=hf"),
     use_lora: bool = typer.Option(True, help="Enable LoRA adapters on HF backbone"),
+    load_in_4bit: bool = typer.Option(False, help="QLoRA: load base weights in 4-bit (CUDA)"),
+    gradient_checkpointing: bool = typer.Option(False, help="Enable gradient checkpointing"),
 ) -> None:
-    """Print export lines to select toy vs Hugging Face (+ LoRA) backbone."""
+    """Print export lines to select toy vs Hugging Face (+ LoRA / QLoRA) backbone."""
     console.print(
         "Export these before training:\n"
         f"  export BACKBONE={name}\n"
         f"  export HF_MODEL_NAME={hf_model}\n"
-        f"  export USE_LORA={str(use_lora).lower()}"
+        f"  export USE_LORA={str(use_lora).lower()}\n"
+        f"  export LOAD_IN_4BIT={str(load_in_4bit).lower()}\n"
+        f"  export GRADIENT_CHECKPOINTING={str(gradient_checkpointing).lower()}"
     )
     console.print(
-        "Or pass via env that pydantic-settings maps from field names "
-        "(backbone, hf_model_name, use_lora)."
+        "PowerShell example (Mistral-7B QLoRA on a 3080):\n"
+        "  $env:BACKBONE='hf'; $env:USE_LORA='true'\n"
+        "  $env:LOAD_IN_4BIT='true'; $env:GRADIENT_CHECKPOINTING='true'\n"
+        "  $env:DEVICE='cuda'; $env:BATCH_SIZE='1'; $env:PPO_BATCH_SIZE='1'\n"
+        "  $env:MAX_SEQ_LEN='128'; $env:TORCH_DTYPE='float16'\n"
+        "  $env:HF_MODEL_NAME='mistralai/Mistral-7B-v0.1'"
     )
 
 

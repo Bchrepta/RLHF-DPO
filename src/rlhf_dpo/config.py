@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     lora_dropout: float = 0.05
     # HF compute dtype on CUDA: float16 is much faster on RTX 30-series.
     torch_dtype: str = "float16"  # float16|bfloat16|float32
+    # QLoRA: 4-bit base weights + LoRA adapters (needed for Mistral-7B on a 3080).
+    load_in_4bit: bool = False
+    gradient_checkpointing: bool = False
 
     # Preference corpus scale: ~5,000 pairs.
     n_train_prefs: int = 5000
