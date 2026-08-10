@@ -66,7 +66,7 @@ rlhf-dpo train-all
 
 ### QLoRA on a single RTX 3080 (Mistral-7B)
 
-4-bit base weights + LoRA adapters. Accept the model license / run `huggingface-cli login` if gated.
+4-bit base weights + LoRA adapters. Accept the model license / run `hf auth login` if gated.
 
 PowerShell:
 
