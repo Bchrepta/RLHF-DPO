@@ -1,6 +1,6 @@
 # Safety Alignment with Direct Preference Optimization & RLHF
 
-PPO-RLHF and DPO for safety alignment, with a CPU toy LM and an optional Hugging Face + LoRA path.
+PPO-RLHF and DPO for safety alignment, with a CPU toy LM and an optional Hugging Face + LoRA / QLoRA path.
 
 The production setup compared PPO-RLHF vs DPO on Mistral-7B across 4 GPUs (FSDP, ZeRO-2), with a reward model trained on ~5,000 preference pairs, a KL penalty against reward hacking, and GPT-4-as-judge safety eval.
 
@@ -8,9 +8,11 @@ This repo supports two backbones:
 - **`toy`** (default): compact causal LM for laptop CPU
 - **`hf`**: Hugging Face causal LM + optional **LoRA / QLoRA** (PEFT + bitsandbytes); default `sshleifer/tiny-gpt2`, or `mistralai/Mistral-7B-v0.1` with `LOAD_IN_4BIT=true` on a 3080
 
-## Results (toy analog)
+## Results
 
-After `rlhf-dpo train-all && rlhf-dpo eval` (see `results/metrics.json`):
+### Toy analog (CPU compact LM)
+
+After `rlhf-dpo train-all && rlhf-dpo eval` on the default toy backbone:
 
 | Metric | Target (Mistral-7B) | Toy analog |
 | --- | ---: | ---: |
@@ -19,6 +21,22 @@ After `rlhf-dpo train-all && rlhf-dpo eval` (see `results/metrics.json`):
 | DPO preference improvement | ~23% | **30.1%** |
 | PPO win-rate vs base | ~71% | **71.6%** |
 | DPO wall-clock speedup vs PPO | ~2.3x | **2.28x** |
+
+### Hugging Face + LoRA (RTX 3080)
+
+Measured on **TinyLlama-1.1B-Chat + LoRA**, `DEVICE=cuda`, `BATCH_SIZE=2`, `MAX_SEQ_LEN=128` (see `results/metrics.json`):
+
+| Metric | Target (Mistral-7B) | TinyLlama + LoRA |
+| --- | ---: | ---: |
+| DPO harm reduction vs base | ~68% | **100%** |
+| DPO helpfulness retained | ~94% | **94.0%** |
+| DPO preference improvement | ~23% | **643%*** |
+| PPO win-rate vs base | ~71% | **61.5%** |
+| DPO wall-clock speedup vs PPO | ~2.3x | **5.31x** |
+
+\*Relative pref lift is large because SFT is intentionally underfit on this synthetic set; absolute DPO pref accuracy is **0.994** vs SFT **0.134**.
+
+Qualitative `demo-safety` (malware prompt): SFT ranks poorly; DPO/PPO put the correct refusal first and push harmful completions down.
 
 ## Quickstart (toy / CPU)
 
