@@ -155,8 +155,13 @@ def completion_logprobs(
     attention_mask: torch.Tensor,
     prompt_len: int | torch.Tensor,
 ) -> torch.Tensor:
-    logits, _ = model(ids[:, :-1])
-    logp = torch.nn.functional.log_softmax(logits, dim=-1)
+    # Pass attention mask when the wrapper supports it (HF path).
+    try:
+        logits, _ = model(ids[:, :-1], attention_mask=attention_mask[:, :-1])
+    except TypeError:
+        logits, _ = model(ids[:, :-1])
+    # fp16/bf16 log_softmax over large vocabs (Mistral) easily overflows -> NaNs in DPO.
+    logp = torch.nn.functional.log_softmax(logits.float(), dim=-1)
     target = ids[:, 1:]
     token_lp = logp.gather(-1, target.unsqueeze(-1)).squeeze(-1)
     b, t = token_lp.shape

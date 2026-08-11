@@ -66,7 +66,7 @@ rlhf-dpo train-all
 
 ### QLoRA on a single RTX 3080 (Mistral-7B)
 
-4-bit base weights + LoRA adapters. Accept the model license / run `huggingface-cli login` if gated.
+4-bit base weights + LoRA adapters. Accept the model license / run `hf auth login` if gated.
 
 PowerShell:
 
@@ -95,7 +95,10 @@ rlhf-dpo demo-safety --method dpo
 
 Notes:
 - PPO caches reward-model scores then frees the RM so only policy + reference stay in VRAM.
+- Preference logprobs are computed in fp32 (avoids DPO `loss=nan` on Mistral/QLoRA).
+- If PPO says logprobs have no grad, set `$env:GRADIENT_CHECKPOINTING = "false"` and retry.
 - If you still OOM, keep batch size 1 or use TinyLlama fp16 LoRA for faster iteration.
+- After pulling QLoRA fixes, delete `checkpoints` and re-run `train-all` (prior DPO/PPO weights from a NaN/no-grad run are not useful).
 
 ## Pipeline
 
