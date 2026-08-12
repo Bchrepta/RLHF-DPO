@@ -80,7 +80,7 @@ $env:GRADIENT_CHECKPOINTING = "true"
 $env:DEVICE = "cuda"
 $env:HF_MODEL_NAME = "mistralai/Mistral-7B-v0.1"
 $env:BATCH_SIZE = "1"
-$env:PPO_BATCH_SIZE = "1"
+$env:PPO_BATCH_SIZE = "2"
 $env:MAX_SEQ_LEN = "128"
 $env:TORCH_DTYPE = "float16"
 

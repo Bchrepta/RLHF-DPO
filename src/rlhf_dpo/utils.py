@@ -223,6 +223,39 @@ def repetition_penalty(text: str) -> float:
     return max(0.0, 1.0 - ratio) * 5.0
 
 
+
+def disable_gradient_checkpointing(model: torch.nn.Module) -> None:
+    """Turn off gradient checkpointing for custom logprob training loops."""
+    candidates = [model]
+    inner = getattr(model, "model", None)
+    if inner is not None:
+        candidates.append(inner)
+    for mod in candidates:
+        if hasattr(mod, "gradient_checkpointing_disable"):
+            try:
+                mod.gradient_checkpointing_disable()
+            except Exception:
+                pass
+        cfg = getattr(mod, "config", None)
+        if cfg is not None and hasattr(cfg, "use_cache"):
+            cfg.use_cache = False
+        if hasattr(mod, "enable_input_require_grads"):
+            try:
+                mod.enable_input_require_grads()
+            except Exception:
+                pass
+
+
+def assert_trainable_grads(params: list[torch.nn.Parameter], what: str) -> None:
+    """Fail fast when a backward pass produced no LoRA/adapter gradients."""
+    with_grad = [p for p in params if p.grad is not None and torch.isfinite(p.grad).all() and p.grad.abs().sum() > 0]
+    if not with_grad:
+        raise RuntimeError(
+            f"{what}: backward produced no trainable gradients. "
+            "For QLoRA PPO/DPO set GRADIENT_CHECKPOINTING=false or update to a build that disables "
+            "checkpointing during preference logprob training."
+        )
+
 def save_checkpoint(model: torch.nn.Module, path: Path) -> None:
     """Save full state_dict, or trainable-only weights for quantized/QLoRA models."""
     path.parent.mkdir(parents=True, exist_ok=True)
