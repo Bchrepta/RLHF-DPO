@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     sft_epochs: int = 1
     rm_epochs: int = 3
     dpo_epochs: int = 1
+    # 0 = no cap. For QLoRA, train_dpo auto-caps unless you set this > 0.
+    dpo_max_steps: int = 0
+    ppo_max_steps: int = 0  # 0 = use ppo_steps; set lower for QLoRA smoke runs
     ppo_steps: int = 1850  # longer online loop so DPO keeps ~2.3x wall-clock advantage
     batch_size: int = 32
     lr: float = 4e-4

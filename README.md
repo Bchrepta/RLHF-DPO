@@ -95,10 +95,22 @@ rlhf-dpo demo-safety --method dpo
 
 Notes:
 - PPO caches reward-model scores then frees the RM so only policy + reference stay in VRAM.
+- DPO caches reference logprobs then frees the ref model (~2x faster) and auto-caps at **1500 steps** under QLoRA (override with `$env:DPO_MAX_STEPS = "8000"` for a full pass).
+- PPO auto-caps at **600 steps** under QLoRA (override with `$env:PPO_MAX_STEPS`).
 - Preference logprobs are computed in fp32 (avoids DPO `loss=nan` on Mistral/QLoRA).
 - If PPO says logprobs have no grad, set `$env:GRADIENT_CHECKPOINTING = "false"` and retry.
 - If you still OOM, keep batch size 1 or use TinyLlama fp16 LoRA for faster iteration.
-- After pulling QLoRA fixes, delete `checkpoints` and re-run `train-all` (prior DPO/PPO weights from a NaN/no-grad run are not useful).
+
+If DPO has been running for many hours, you can Ctrl+C (SFT/RM checkpoints are already saved) then:
+
+```powershell
+git pull
+pip install -e ".[qlora]"
+# keep checkpoints/; only redo DPO + PPO
+rlhf-dpo train-dpo
+rlhf-dpo train-ppo
+rlhf-dpo eval --gen-limit 12
+```
 
 ## Pipeline
 

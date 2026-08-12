@@ -133,7 +133,13 @@ def train_ppo(
     running_reward = 0.0
     running_kl = 0.0
     bs = settings.ppo_batch_size
-    for step in tqdm(range(settings.ppo_steps), desc="ppo"):
+    ppo_steps = int(getattr(settings, "ppo_max_steps", 0) or 0)
+    if ppo_steps <= 0:
+        ppo_steps = settings.ppo_steps
+        if getattr(settings, "load_in_4bit", False):
+            ppo_steps = min(ppo_steps, 600)
+    print(f"PPO steps={ppo_steps} (configured ppo_steps={settings.ppo_steps})")
+    for step in tqdm(range(ppo_steps), desc="ppo"):
         batch_idxs = [((step * bs + i) % len(prefs)) for i in range(bs)]
         batch = [prefs[i] for i in batch_idxs]
 
