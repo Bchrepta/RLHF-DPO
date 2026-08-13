@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     beta: float = 0.10
     ppo_clip: float = 0.2
     ppo_kl_coef: float = 0.22  # KL penalty vs reward hacking
-    ppo_batch_size: int = 8
+    ppo_batch_size: int = 8  # keep >=2; size 1 zeroes mean-centered advantages
     reward_norm_eps: float = 1e-6
 
     data_dir: Path = Field(default_factory=lambda: ROOT / "data")

@@ -16,6 +16,8 @@ from rlhf_dpo.utils import (
     build_tokenizer,
     completion_logprobs,
     encode_pair,
+    assert_trainable_grads,
+    disable_gradient_checkpointing,
     get_device,
     load_checkpoint,
     save_checkpoint,
@@ -73,6 +75,7 @@ def train_dpo(
     if getattr(settings, "load_in_4bit", False):
         # QLoRA is much more sensitive; keep updates small.
         dpo_lr = min(dpo_lr, 2e-5)
+    disable_gradient_checkpointing(policy)
     trainable = [p for p in policy.parameters() if p.requires_grad]
     if not trainable:
         raise RuntimeError("DPO: no trainable parameters (LoRA adapters missing?)")
@@ -118,6 +121,8 @@ def train_dpo(
                 continue
             opt.zero_grad(set_to_none=True)
             loss.backward()
+            if steps == 0:
+                assert_trainable_grads(trainable, "DPO")
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             opt.step()
             total += float(loss.item())

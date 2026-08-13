@@ -16,6 +16,8 @@ from rlhf_dpo.utils import (
     completion_logprob_mean,
     encode_pair,
     get_device,
+    assert_trainable_grads,
+    disable_gradient_checkpointing,
     is_quantized_module,
     load_checkpoint,
     place_model,
@@ -113,6 +115,9 @@ def train_ppo(
         p.requires_grad_(False)
     ref.eval()
 
+    # Custom logprob path + gradient checkpointing often yields zero LoRA grads on QLoRA.
+    disable_gradient_checkpointing(policy)
+    disable_gradient_checkpointing(ref)
     trainable = [p for p in policy.parameters() if p.requires_grad]
     if not trainable:
         raise RuntimeError("PPO: no trainable parameters (LoRA adapters missing?)")
@@ -133,6 +138,12 @@ def train_ppo(
     running_reward = 0.0
     running_kl = 0.0
     bs = settings.ppo_batch_size
+    print(f"PPO batch_size={bs}")
+    if bs < 2:
+        print(
+            "PPO note: batch_size=1 disables mean-baseline advantages; "
+            "using raw reward-KL advantages. Prefer PPO_BATCH_SIZE>=2."
+        )
     for step in tqdm(range(settings.ppo_steps), desc="ppo"):
         batch_idxs = [((step * bs + i) % len(prefs)) for i in range(bs)]
         batch = [prefs[i] for i in batch_idxs]
@@ -172,12 +183,12 @@ def train_ppo(
         r_std = max(run_var ** 0.5, settings.reward_norm_eps)
         reward_t = (reward_t - run_mean) / r_std
 
-        # old_logp from current weights (no deepcopy — required for quantized models)
+        # Deterministic logprobs (eval/no dropout). Train-mode dropout made PPO
+        # ratios extreme, so every sample was clipped and grads became zero.
+        policy.eval()
         with torch.no_grad():
             old_logp = completion_logprob_mean(policy, ids_b, mask_b, plen_t)
             ref_logp = completion_logprob_mean(ref, ids_b, mask_b, plen_t)
-
-        policy.train()
         new_logp = completion_logprob_mean(policy, ids_b, mask_b, plen_t)
         if not new_logp.requires_grad:
             raise RuntimeError(
@@ -186,8 +197,12 @@ def train_ppo(
             )
         kl = (new_logp - ref_logp).clamp(-2.0, 2.0)
         shaped = reward_t - settings.ppo_kl_coef * kl.detach()
-        advantage = shaped - shaped.mean()
-        advantage = advantage / (advantage.std(unbiased=False) + 1e-6)
+        # batch_size=1 => mean-centered advantage is always 0. Use raw shaped then.
+        if shaped.numel() > 1:
+            advantage = shaped - shaped.mean()
+            advantage = advantage / (advantage.std(unbiased=False) + 1e-6)
+        else:
+            advantage = shaped
 
         ratio = torch.exp((new_logp - old_logp.detach()).clamp(-2.0, 2.0))
         unclipped = ratio * advantage
@@ -196,15 +211,20 @@ def train_ppo(
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        if step == 0 and float(advantage.detach().abs().max()) > 1e-6:
+            assert_trainable_grads(trainable, "PPO")
         torch.nn.utils.clip_grad_norm_(trainable, 0.5)
         opt.step()
 
         running_reward = 0.9 * running_reward + 0.1 * float(reward_t.mean().item())
         running_kl = 0.9 * running_kl + 0.1 * float(kl.mean().item())
         if (step + 1) % 50 == 0:
+            with torch.no_grad():
+                delta = float((new_logp - old_logp).abs().mean().item())
             tqdm.write(
                 f"PPO step {step+1}: loss={float(loss.item()):.4f} "
-                f"reward_ema={running_reward:.3f} kl_ema={running_kl:.3f}"
+                f"reward_ema={running_reward:.3f} kl_ema={running_kl:.3f} "
+                f"logp_delta={delta:.4f}"
             )
 
     save_checkpoint(policy, out)
