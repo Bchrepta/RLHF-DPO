@@ -71,7 +71,7 @@ def place_model(model: torch.nn.Module, device: torch.device) -> torch.nn.Module
     return model.to(device)
 
 
-def build_lm(settings: Settings, tokenizer) -> torch.nn.Module:
+def build_lm(settings: Settings, tokenizer, *, for_inference: bool = False) -> torch.nn.Module:
     if settings.backbone == "hf":
         from rlhf_dpo.model.hf_backbone import HFCausalLM
 
@@ -85,6 +85,7 @@ def build_lm(settings: Settings, tokenizer) -> torch.nn.Module:
             torch_dtype=getattr(settings, "torch_dtype", "float16"),
             load_in_4bit=bool(getattr(settings, "load_in_4bit", False)),
             gradient_checkpointing=bool(getattr(settings, "gradient_checkpointing", False)),
+            for_inference=for_inference,
         )
     vocab = getattr(tokenizer, "vocab_size", settings.vocab_size)
     return CausalLM(
@@ -97,8 +98,10 @@ def build_lm(settings: Settings, tokenizer) -> torch.nn.Module:
     )
 
 
-def build_reward_model(settings: Settings, tokenizer) -> torch.nn.Module:
-    backbone = build_lm(settings, tokenizer)
+def build_reward_model(
+    settings: Settings, tokenizer, *, for_inference: bool = False
+) -> torch.nn.Module:
+    backbone = build_lm(settings, tokenizer, for_inference=for_inference)
     if settings.backbone == "hf":
         from rlhf_dpo.model.hf_backbone import HFRewardModel
 

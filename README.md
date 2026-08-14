@@ -95,7 +95,7 @@ rlhf-dpo demo-safety --method dpo
 
 Notes:
 - PPO caches reward-model scores then frees the RM so only policy + reference stay in VRAM.
-- Eval loads SFT / DPO / PPO / RM **one at a time** (with `empty_cache` between stages) so QLoRA fits a 10GB 3080. Do not keep a prior Python process holding the GPU; if a load was interrupted, start a fresh shell before `eval` / `demo-safety`.
+- Eval uses **inference-only** 4-bit loads (no `prepare_model_for_kbit_training` fp16→fp32 casts) and unloads each PEFT/bitsandbytes model before the next. Each policy is loaded once; the reward model scores everything in one pass. Start a fresh shell if a previous load was interrupted.
 - Preference logprobs are computed in fp32 (avoids DPO `loss=nan` on Mistral/QLoRA).
 - If PPO says logprobs have no grad, set `$env:GRADIENT_CHECKPOINTING = "false"` and retry.
 - If you still OOM, keep batch size 1 or use TinyLlama fp16 LoRA for faster iteration.

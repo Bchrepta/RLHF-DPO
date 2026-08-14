@@ -140,6 +140,10 @@ def test_hf_backbone_optional():
     assert logits.shape[0] == 1
     assert loss is not None
 
+    infer = build_lm(settings, tok, for_inference=True)
+    assert getattr(infer, "_for_inference", False) is True
+    assert all(not p.requires_grad for p in infer.parameters())
+
 
 
 def test_qlora_flags_default_off():

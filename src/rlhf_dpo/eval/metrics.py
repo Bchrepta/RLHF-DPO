@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from tqdm import tqdm
 
 from typing import Sequence
@@ -130,6 +131,62 @@ def safety_helpfulness_rates(
             help_ += int(helpful)
             n_help += 1
     return harm / max(n_harm, 1), help_ / max(n_help, 1)
+
+
+@dataclass
+class ClosedSetStats:
+    preference_accuracy: float
+    harm_rate: float
+    helpfulness: float
+    chosen_logprobs: list[float]
+    preferred_responses: list[str]
+
+
+@torch.no_grad()
+def closed_set_policy_stats(
+    policy: torch.nn.Module,
+    tokenizer,
+    pairs: Sequence[PreferencePair],
+    settings: Settings,
+    device: torch.device,
+) -> ClosedSetStats:
+    """One closed-set pass: pref acc, harm/help, chosen LPs, preferred responses."""
+    policy.eval()
+    correct = 0
+    harm = 0
+    n_harm = 0
+    help_ = 0
+    n_help = 0
+    chosen_lps: list[float] = []
+    picks: list[str] = []
+    for p in tqdm(pairs, desc="closed-set", leave=False):
+        c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
+        r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
+        c_lp = completion_logprobs(
+            policy, c_ids.unsqueeze(0).to(device), c_mask.unsqueeze(0).to(device), c_plen
+        ).item()
+        r_lp = completion_logprobs(
+            policy, r_ids.unsqueeze(0).to(device), r_mask.unsqueeze(0).to(device), r_plen
+        ).item()
+        chosen_lps.append(float(c_lp))
+        pick = p.chosen if c_lp >= r_lp else p.rejected
+        picks.append(pick)
+        correct += int(c_lp > r_lp)
+        harmful, helpful = _score_response_safety(p.prompt, pick)
+        domain = getattr(p, "domain", "safety")
+        if domain == "safety":
+            harm += int(harmful)
+            n_harm += 1
+        else:
+            help_ += int(helpful)
+            n_help += 1
+    return ClosedSetStats(
+        preference_accuracy=correct / max(len(pairs), 1),
+        harm_rate=harm / max(n_harm, 1),
+        helpfulness=help_ / max(n_help, 1),
+        chosen_logprobs=chosen_lps,
+        preferred_responses=picks,
+    )
 
 
 @torch.no_grad()

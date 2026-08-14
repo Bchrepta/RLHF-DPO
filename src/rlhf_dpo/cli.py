@@ -123,6 +123,9 @@ def eval_cmd(
 ) -> None:
     """Evaluate safety/helpfulness metrics for SFT vs DPO vs PPO."""
     import json
+    import os
+
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     settings = get_settings()
     console.print(
@@ -188,7 +191,7 @@ def demo(
     settings = get_settings()
     device = get_device(settings)
     tokenizer = build_tokenizer(settings.data_dir, settings)
-    model = place_model(build_lm(settings, tokenizer), device)
+    model = place_model(build_lm(settings, tokenizer, for_inference=True), device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
         console.print(f"[red]Missing {ckpt}; run train-all or train-{method}.[/red]")
@@ -236,7 +239,7 @@ def generate_cmd(
     settings = get_settings()
     device = get_device(settings)
     tokenizer = build_tokenizer(settings.data_dir, settings)
-    model = place_model(build_lm(settings, tokenizer), device)
+    model = place_model(build_lm(settings, tokenizer, for_inference=True), device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
         console.print(f"[red]Missing {ckpt}; run train-all or train-{method}[/red]")
@@ -274,7 +277,7 @@ def demo_safety(
     settings = get_settings()
     device = get_device(settings)
     tokenizer = build_tokenizer(settings.data_dir, settings)
-    model = place_model(build_lm(settings, tokenizer), device)
+    model = place_model(build_lm(settings, tokenizer, for_inference=True), device)
     ckpt = settings.ckpt_dir / f"{method}.pt"
     if not ckpt.exists():
         console.print(f"[red]Missing {ckpt}; run train-all or train-{method}.[/red]")

@@ -55,6 +55,7 @@ class HFCausalLM(nn.Module):
         torch_dtype: str = "float16",
         load_in_4bit: bool = False,
         gradient_checkpointing: bool = False,
+        for_inference: bool = False,
     ) -> None:
         super().__init__()
         _require_transformers()
@@ -64,6 +65,7 @@ class HFCausalLM(nn.Module):
         self.max_seq_len = max_seq_len
         self._quantized = bool(load_in_4bit)
         self._lora = False
+        self._for_inference = bool(for_inference)
 
         config = AutoConfig.from_pretrained(model_name)
         # Keep n_positions / max_position_embeddings aligned when possible
@@ -86,6 +88,9 @@ class HFCausalLM(nn.Module):
                 bnb_4bit_use_double_quant=True,
             )
             load_kwargs["device_map"] = {"": 0}
+            load_kwargs["low_cpu_mem_usage"] = True
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         else:
             load_kwargs["torch_dtype"] = _resolve_dtype(torch_dtype)
 
@@ -94,97 +99,16 @@ class HFCausalLM(nn.Module):
         self.vocab_size = int(config.vocab_size)
 
         if use_lora:
-            try:
-                from peft import LoraConfig, TaskType, get_peft_model
-
-                if load_in_4bit:
-                    from peft import prepare_model_for_kbit_training
-
-                    self.model = prepare_model_for_kbit_training(
-                        self.model,
-                        use_gradient_checkpointing=gradient_checkpointing,
-                        gradient_checkpointing_kwargs={"use_reentrant": False},
-                    )
-                elif gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
-                    self.model.gradient_checkpointing_enable(
-                        gradient_checkpointing_kwargs={"use_reentrant": False}
-                    )
-                    if hasattr(self.model, "config"):
-                        self.model.config.use_cache = False
-
-                # GPT-2 style + Llama/Mistral attention (+ optional MLP) targets
-                targets = [
-                    "c_attn",
-                    "c_proj",
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                ]
-                lora = LoraConfig(
-                    task_type=TaskType.CAUSAL_LM,
-                    r=lora_r,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    target_modules=targets,
-                    bias="none",
-                )
-                self.model = get_peft_model(self.model, lora)
-                self._lora = True
-                # Required for grad checkpointing + custom logprob paths (DPO/PPO):
-                # token ids themselves don't require grad, so embeddings must.
-                if load_in_4bit or gradient_checkpointing:
-                    if hasattr(self.model, "enable_input_require_grads"):
-                        self.model.enable_input_require_grads()
-            except TypeError:
-                # Older peft/transformers may not accept gradient_checkpointing_kwargs
-                from peft import LoraConfig, TaskType, get_peft_model
-
-                if load_in_4bit:
-                    from peft import prepare_model_for_kbit_training
-
-                    self.model = prepare_model_for_kbit_training(
-                        self.model,
-                        use_gradient_checkpointing=gradient_checkpointing,
-                    )
-                elif gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
-                    self.model.gradient_checkpointing_enable()
-                    if hasattr(self.model, "config"):
-                        self.model.config.use_cache = False
-                targets = [
-                    "c_attn",
-                    "c_proj",
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                ]
-                lora = LoraConfig(
-                    task_type=TaskType.CAUSAL_LM,
-                    r=lora_r,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    target_modules=targets,
-                    bias="none",
-                )
-                self.model = get_peft_model(self.model, lora)
-                self._lora = True
-                if load_in_4bit or gradient_checkpointing:
-                    if hasattr(self.model, "enable_input_require_grads"):
-                        self.model.enable_input_require_grads()
-            except Exception as exc:
-                if load_in_4bit:
-                    raise RuntimeError(
-                        f"Failed to attach LoRA for QLoRA ({type(exc).__name__}: {exc})"
-                    ) from exc
-                self._lora = False
-        elif gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
+            self._attach_lora(
+                lora_r=lora_r,
+                lora_alpha=lora_alpha,
+                lora_dropout=0.0 if for_inference else lora_dropout,
+                gradient_checkpointing=gradient_checkpointing,
+                for_inference=for_inference,
+            )
+        elif (not for_inference) and gradient_checkpointing and hasattr(
+            self.model, "gradient_checkpointing_enable"
+        ):
             try:
                 self.model.gradient_checkpointing_enable(
                     gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -193,6 +117,96 @@ class HFCausalLM(nn.Module):
                 self.model.gradient_checkpointing_enable()
             if hasattr(self.model, "config"):
                 self.model.config.use_cache = False
+
+        if for_inference:
+            self.model.eval()
+            for p in self.model.parameters():
+                p.requires_grad_(False)
+
+    def _wrap_peft(self, lora_r: int, lora_alpha: int, lora_dropout: float) -> None:
+        from peft import LoraConfig, TaskType, get_peft_model
+
+        # GPT-2 style + Llama/Mistral attention (+ optional MLP) targets
+        targets = [
+            "c_attn",
+            "c_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ]
+        lora = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            target_modules=targets,
+            bias="none",
+        )
+        self.model = get_peft_model(self.model, lora)
+        self._lora = True
+
+    def _attach_lora(
+        self,
+        *,
+        lora_r: int,
+        lora_alpha: int,
+        lora_dropout: float,
+        gradient_checkpointing: bool,
+        for_inference: bool,
+    ) -> None:
+        """Attach LoRA. Training prep (kbit fp32 casts / checkpointing) is skipped for eval."""
+        try:
+            if self._quantized and not for_inference:
+                from peft import prepare_model_for_kbit_training
+
+                self.model = prepare_model_for_kbit_training(
+                    self.model,
+                    use_gradient_checkpointing=gradient_checkpointing,
+                    gradient_checkpointing_kwargs={"use_reentrant": False},
+                )
+            elif (not for_inference) and gradient_checkpointing and hasattr(
+                self.model, "gradient_checkpointing_enable"
+            ):
+                self.model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+                if hasattr(self.model, "config"):
+                    self.model.config.use_cache = False
+            self._wrap_peft(lora_r, lora_alpha, lora_dropout)
+            # Required for grad checkpointing + custom logprob paths (DPO/PPO):
+            # token ids themselves don't require grad, so embeddings must.
+            if (not for_inference) and (self._quantized or gradient_checkpointing):
+                if hasattr(self.model, "enable_input_require_grads"):
+                    self.model.enable_input_require_grads()
+        except TypeError:
+            # Older peft/transformers may not accept gradient_checkpointing_kwargs
+            if self._quantized and not for_inference:
+                from peft import prepare_model_for_kbit_training
+
+                self.model = prepare_model_for_kbit_training(
+                    self.model,
+                    use_gradient_checkpointing=gradient_checkpointing,
+                )
+            elif (not for_inference) and gradient_checkpointing and hasattr(
+                self.model, "gradient_checkpointing_enable"
+            ):
+                self.model.gradient_checkpointing_enable()
+                if hasattr(self.model, "config"):
+                    self.model.config.use_cache = False
+            self._wrap_peft(lora_r, lora_alpha, lora_dropout)
+            if (not for_inference) and (self._quantized or gradient_checkpointing):
+                if hasattr(self.model, "enable_input_require_grads"):
+                    self.model.enable_input_require_grads()
+        except Exception as exc:
+            if self._quantized:
+                raise RuntimeError(
+                    f"Failed to attach LoRA for QLoRA ({type(exc).__name__}: {exc})"
+                ) from exc
+            self._lora = False
 
     def forward(
         self,
@@ -257,6 +271,24 @@ class HFCausalLM(nn.Module):
         mask = attention_mask[:, 1:].float()
         return (token_logp * mask).sum(dim=-1)
 
+    def release_cuda(self) -> None:
+        """Drop device-mapped / PEFT refs so bitsandbytes weights can be freed."""
+        inner = getattr(self, "model", None)
+        if inner is None:
+            return
+        try:
+            from accelerate.hooks import remove_hook_from_module
+
+            remove_hook_from_module(inner, recurse=True)
+        except Exception:
+            pass
+        try:
+            if hasattr(inner, "base_model"):
+                inner.base_model = None
+        except Exception:
+            pass
+        self.model = None
+
 
 class HFRewardModel(nn.Module):
     """Scalar reward head on pooled last hidden states of an HF backbone."""
@@ -292,6 +324,12 @@ class HFRewardModel(nn.Module):
             mask = attention_mask.unsqueeze(-1).float()
             pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
         return self.v_head(pooled.float()).squeeze(-1)
+
+    def release_cuda(self) -> None:
+        backbone = getattr(self, "backbone", None)
+        if backbone is not None and hasattr(backbone, "release_cuda"):
+            backbone.release_cuda()
+        self.backbone = None
 
 
 class HFTokenizerAdapter:
