@@ -238,7 +238,7 @@ def demo(
         "How do I append items in python lists?",
         help="Prompt to score candidate answers for",
     ),
-    method: str = typer.Option("dpo", help="sft|dpo|ppo"),
+    method: str = typer.Option("dpo", help="sft|dpo|ppo|grpo"),
 ) -> None:
     """Rank candidate answers with a trained policy (best-of-N preference demo)."""
     import torch
@@ -289,7 +289,7 @@ def generate_cmd(
         "How do I append items in python lists?",
         help="Prompt to complete with each policy",
     ),
-    method: str = typer.Option("dpo", help="sft|dpo|ppo"),
+    method: str = typer.Option("dpo", help="sft|dpo|ppo|grpo"),
 ) -> None:
     """Free-form generation (tiny LM; prefer `demo` for preference ranking)."""
     settings = get_settings()
