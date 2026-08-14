@@ -14,8 +14,7 @@ from tqdm import tqdm
 from rlhf_dpo.config import Settings
 from rlhf_dpo.data.preferences import PreferencePair, load_prefs
 from rlhf_dpo.eval.metrics import (
-    preference_accuracy,
-    safety_helpfulness_rates,
+    closed_set_policy_stats,
 )
 from rlhf_dpo.utils import (
     build_lm,
@@ -23,7 +22,6 @@ from rlhf_dpo.utils import (
     build_reward_model,
     build_tokenizer,
     completion_logprob_mean,
-    completion_logprobs,
     decode_response,
     encode_pair,
     encode_prompt,
@@ -58,17 +56,52 @@ class AggregateReport:
     training_wall_clock_seconds: dict[str, float] = field(default_factory=dict)
 
 
+def _release_module(mod) -> None:
+    if mod is None:
+        return
+    releaser = getattr(mod, "release_cuda", None)
+    if callable(releaser):
+        try:
+            releaser()
+            return
+        except Exception:
+            pass
+    try:
+        from accelerate.hooks import remove_hook_from_module
+
+        remove_hook_from_module(mod, recurse=True)
+    except Exception:
+        pass
+    for attr in ("model", "base_model", "backbone"):
+        inner = getattr(mod, attr, None)
+        if inner is not None and inner is not mod:
+            _release_module(inner)
+            try:
+                setattr(mod, attr, None)
+            except Exception:
+                pass
+
+
 def _free_cuda(*objs) -> None:
     """Drop model refs and reclaim CUDA memory (needed between QLoRA loads on 10GB)."""
     for obj in objs:
+        _release_module(obj)
         del obj
     gc.collect()
+    gc.collect()
     if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
         torch.cuda.empty_cache()
+        if hasattr(torch.cuda, "ipc_collect"):
+            torch.cuda.ipc_collect()
 
 
 def _load_policy(settings: Settings, tokenizer, ckpt_dir: Path, name: str, device: torch.device):
-    m = place_model(build_lm(settings, tokenizer), device)
+    _free_cuda()
+    m = place_model(build_lm(settings, tokenizer, for_inference=True), device)
     path = ckpt_dir / name
     if path.exists():
         load_checkpoint(m, path, device)
@@ -77,7 +110,8 @@ def _load_policy(settings: Settings, tokenizer, ckpt_dir: Path, name: str, devic
 
 
 def _load_reward(settings: Settings, tokenizer, ckpt_dir: Path, device: torch.device):
-    rm = place_model(build_reward_model(settings, tokenizer), device)
+    _free_cuda()
+    rm = place_model(build_reward_model(settings, tokenizer, for_inference=True), device)
     if (ckpt_dir / "reward.pt").exists():
         load_checkpoint(rm, ckpt_dir / "reward.pt", device)
     rm.eval()
@@ -160,52 +194,6 @@ def _completion_lp_means(
     return vals
 
 
-def _chosen_logprobs(
-    policy,
-    prefs: list[PreferencePair],
-    tokenizer,
-    settings: Settings,
-    device: torch.device,
-) -> list[float]:
-    policy.eval()
-    out: list[float] = []
-    with torch.no_grad():
-        for p in tqdm(prefs, desc="pair-lp", leave=False):
-            ids, mask, plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
-            out.append(
-                float(
-                    completion_logprobs(
-                        policy, ids.unsqueeze(0).to(device), mask.unsqueeze(0).to(device), plen
-                    ).item()
-                )
-            )
-    return out
-
-
-def _preferred_responses(
-    policy,
-    prefs: list[PreferencePair],
-    tokenizer,
-    settings: Settings,
-    device: torch.device,
-) -> list[str]:
-    """Closed-set pick: which of (chosen, rejected) the policy ranks higher."""
-    policy.eval()
-    out: list[str] = []
-    with torch.no_grad():
-        for p in tqdm(prefs, desc="closed-pick", leave=False):
-            c_ids, c_mask, c_plen = encode_pair(tokenizer, p.prompt, p.chosen, settings.max_seq_len)
-            r_ids, r_mask, r_plen = encode_pair(tokenizer, p.prompt, p.rejected, settings.max_seq_len)
-            c_lp = completion_logprobs(
-                policy, c_ids.unsqueeze(0).to(device), c_mask.unsqueeze(0).to(device), c_plen
-            ).item()
-            r_lp = completion_logprobs(
-                policy, r_ids.unsqueeze(0).to(device), r_mask.unsqueeze(0).to(device), r_plen
-            ).item()
-            out.append(p.chosen if c_lp >= r_lp else p.rejected)
-    return out
-
-
 def _rm_win_from_picks(
     rm,
     prefs: list[PreferencePair],
@@ -240,11 +228,13 @@ def run_eval(
     training_times: dict[str, float] | None = None,
 ) -> AggregateReport:
     """
-    Evaluate SFT / DPO / PPO with sequential model loading.
+    Evaluate SFT / DPO / PPO with sequential, inference-only model loading.
 
-    On QLoRA (Mistral-7B 4-bit, ~10GB), holding SFT+DPO+PPO+RM at once OOMs.
-    This harness keeps at most one large model resident between stages
-    (generate → free → score with RM → free → KL LPs one policy at a time).
+    On QLoRA (Mistral-7B 4-bit, ~10GB):
+    - skip prepare_model_for_kbit_training (fp16→fp32 casts OOMs on a 3080)
+    - keep at most one large model resident
+    - each policy is loaded once for closed-set + generation (+ KL LPs)
+    - the reward model is loaded once at the end to score everything
     """
     data_dir = data_dir or settings.data_dir
     ckpt_dir = ckpt_dir or settings.ckpt_dir
@@ -257,155 +247,123 @@ def run_eval(
     _free_cuda()
     print(
         f"Eval device={device} backbone={settings.backbone} "
-        f"n_prefs={len(prefs)} gen_limit={gen_limit} (sequential VRAM-safe loads)"
+        f"n_prefs={len(prefs)} gen_limit={gen_limit} "
+        f"(inference-only sequential loads)"
     )
-
-    # --- Reward model pair accuracy (RM only) ---
-    print("Scoring reward-model pair accuracy...")
-    rm = _load_reward(settings, tokenizer, ckpt_dir, device)
-    rm_acc = _reward_model_pair_acc(rm, prefs, tokenizer, settings, device)
-    _free_cuda(rm)
 
     wall: dict[str, float] = {}
 
-    def policy_rank_metrics(name: str) -> tuple[float, float | None, float | None, float]:
-        """pref_acc, harm, help, elapsed — policy only."""
-        print(f"Evaluating {name} (preference rank + safety/help)...")
+    def eval_policy(name: str, *, gen: bool, kl_on_own_gen: bool):
+        print(f"Evaluating {name} (closed-set" + (" + generation)" if gen else ")..."))
         t0 = time.time()
         model = _load_policy(settings, tokenizer, ckpt_dir, f"{name}.pt", device)
-        pref_acc = preference_accuracy(model, tokenizer, prefs, settings, device)
-        harm, help_ = safety_helpfulness_rates(model, tokenizer, prefs, settings, device)
-        _free_cuda(model)
-        return pref_acc, harm, help_, time.time() - t0
-
-    def gen_reward_and_vs_sft(
-        name: str,
-        sft_rewards: list[float] | None,
-        sft_responses_for_kl: bool,
-    ) -> tuple[float, float | None, float | None, float]:
-        """
-        mean_gen_reward, win_vs_sft, mean_kl, elapsed.
-
-        Stages: generate with policy → score with RM → optional KL with policy+SFT.
-        """
-        print(f"Evaluating {name} (generation reward / win-rate)...")
-        t0 = time.time()
-        model = _load_policy(settings, tokenizer, ckpt_dir, f"{name}.pt", device)
-        responses = _generate_responses(model, gen_prompts, tokenizer, settings, device, gen_limit)
-        _free_cuda(model)
-
-        rm_local = _load_reward(settings, tokenizer, ckpt_dir, device)
-        rewards = _score_responses(rm_local, gen_prompts, responses, tokenizer, settings, device)
-        _free_cuda(rm_local)
-        mean_r = sum(rewards) / max(len(rewards), 1)
-
-        win: float | None = None
-        if sft_rewards is not None:
-            wins = sum(1 for rp, rs in zip(rewards, sft_rewards) if rp > rs)
-            win = wins / max(len(rewards), 1)
-
-        kl: float | None = None
-        if sft_responses_for_kl and sft_rewards is not None:
-            # One model at a time: policy LPs then SFT LPs on the same completions.
-            policy = _load_policy(settings, tokenizer, ckpt_dir, f"{name}.pt", device)
-            pol_lps = _completion_lp_means(
-                policy, gen_prompts, responses, tokenizer, settings, device, desc="kl-pol"
+        stats = closed_set_policy_stats(model, tokenizer, prefs, settings, device)
+        responses: list[str] = []
+        own_lps: list[float] = []
+        if gen:
+            responses = _generate_responses(
+                model, gen_prompts, tokenizer, settings, device, gen_limit
             )
-            _free_cuda(policy)
-            sft = _load_policy(settings, tokenizer, ckpt_dir, "sft.pt", device)
-            sft_lps = _completion_lp_means(
-                sft, gen_prompts, responses, tokenizer, settings, device, desc="kl-sft"
-            )
-            _free_cuda(sft)
-            kl = sum(p - s for p, s in zip(pol_lps, sft_lps)) / max(len(pol_lps), 1)
+            if kl_on_own_gen:
+                own_lps = _completion_lp_means(
+                    model, gen_prompts, responses, tokenizer, settings, device, desc=f"kl-{name}"
+                )
+        _free_cuda(model)
+        return stats, responses, own_lps, time.time() - t0
 
-        return mean_r, win, kl, time.time() - t0
+    # --- Policies (one load each) ---
+    sft_stats, sft_responses, _, t_sft = eval_policy("sft", gen=True, kl_on_own_gen=False)
+    wall["sft"] = t_sft
 
-    # --- SFT (cache gen rewards once for DPO/PPO win-rate baselines) ---
-    sft_pref, sft_harm, sft_help, t_rank = policy_rank_metrics("sft")
-    print("Evaluating sft (generation reward; cached for win-rates)...")
-    t0 = time.time()
+    dpo_stats, dpo_responses, dpo_pol_lps, t_dpo = eval_policy(
+        "dpo", gen=True, kl_on_own_gen=True
+    )
+    wall["dpo"] = t_dpo
+
+    ppo_stats, ppo_responses, ppo_pol_lps, t_ppo = eval_policy(
+        "ppo", gen=True, kl_on_own_gen=True
+    )
+    wall["ppo"] = t_ppo
+
+    # --- KL vs SFT: reload SFT once on DPO/PPO completions ---
+    print("KL vs SFT (reload SFT on DPO/PPO completions)...")
     sft = _load_policy(settings, tokenizer, ckpt_dir, "sft.pt", device)
-    sft_responses = _generate_responses(sft, gen_prompts, tokenizer, settings, device, gen_limit)
+    sft_on_dpo = _completion_lp_means(
+        sft, gen_prompts, dpo_responses, tokenizer, settings, device, desc="kl-sft-dpo"
+    )
+    sft_on_ppo = _completion_lp_means(
+        sft, gen_prompts, ppo_responses, tokenizer, settings, device, desc="kl-sft-ppo"
+    )
     _free_cuda(sft)
+    dpo_kl = sum(p - s for p, s in zip(dpo_pol_lps, sft_on_dpo)) / max(len(dpo_pol_lps), 1)
+    ppo_kl = sum(p - s for p, s in zip(ppo_pol_lps, sft_on_ppo)) / max(len(ppo_pol_lps), 1)
+
+    # --- Reward model once: pair acc + gen scores + closed-set RM win ---
+    print("Scoring reward model (pair acc + generation rewards + closed-set wins)...")
     rm = _load_reward(settings, tokenizer, ckpt_dir, device)
+    rm_acc = _reward_model_pair_acc(rm, prefs, tokenizer, settings, device)
     sft_rewards = _score_responses(rm, gen_prompts, sft_responses, tokenizer, settings, device)
+    dpo_rewards = _score_responses(rm, gen_prompts, dpo_responses, tokenizer, settings, device)
+    ppo_rewards = _score_responses(rm, gen_prompts, ppo_responses, tokenizer, settings, device)
+    ppo_closed = _rm_win_from_picks(
+        rm,
+        prefs,
+        ppo_stats.preferred_responses,
+        sft_stats.preferred_responses,
+        tokenizer,
+        settings,
+        device,
+    )
     _free_cuda(rm)
+
     sft_mean_r = sum(sft_rewards) / max(len(sft_rewards), 1)
-    wall["sft"] = t_rank + (time.time() - t0)
+    dpo_mean_r = sum(dpo_rewards) / max(len(dpo_rewards), 1)
+    ppo_mean_r = sum(ppo_rewards) / max(len(ppo_rewards), 1)
+    dpo_win = sum(1 for rp, rs in zip(dpo_rewards, sft_rewards) if rp > rs) / max(
+        len(dpo_rewards), 1
+    )
+    ppo_win = sum(1 for rp, rs in zip(ppo_rewards, sft_rewards) if rp > rs) / max(
+        len(ppo_rewards), 1
+    )
 
     sft_m = MethodMetrics(
         name="sft",
-        preference_accuracy=sft_pref,
+        preference_accuracy=sft_stats.preference_accuracy,
         mean_gen_reward=sft_mean_r,
         win_rate_vs_sft=None,
         mean_kl_to_sft=None,
-        harm_rate=sft_harm,
-        helpfulness=sft_help,
+        harm_rate=sft_stats.harm_rate,
+        helpfulness=sft_stats.helpfulness,
     )
-
-    # --- DPO ---
-    dpo_pref, dpo_harm, dpo_help, t_rank = policy_rank_metrics("dpo")
-    dpo_mean_r, dpo_win, dpo_kl, t_gen = gen_reward_and_vs_sft(
-        "dpo", sft_rewards=sft_rewards, sft_responses_for_kl=True
-    )
-    wall["dpo"] = t_rank + t_gen
     dpo_m = MethodMetrics(
         name="dpo",
-        preference_accuracy=dpo_pref,
+        preference_accuracy=dpo_stats.preference_accuracy,
         mean_gen_reward=dpo_mean_r,
         win_rate_vs_sft=dpo_win,
         mean_kl_to_sft=dpo_kl,
-        harm_rate=dpo_harm,
-        helpfulness=dpo_help,
+        harm_rate=dpo_stats.harm_rate,
+        helpfulness=dpo_stats.helpfulness,
     )
-
-    # --- PPO ---
-    ppo_pref, ppo_harm, ppo_help, t_rank = policy_rank_metrics("ppo")
-    ppo_mean_r, ppo_win, ppo_kl, t_gen = gen_reward_and_vs_sft(
-        "ppo", sft_rewards=sft_rewards, sft_responses_for_kl=True
-    )
-    wall["ppo"] = t_rank + t_gen
     ppo_m = MethodMetrics(
         name="ppo",
-        preference_accuracy=ppo_pref,
+        preference_accuracy=ppo_stats.preference_accuracy,
         mean_gen_reward=ppo_mean_r,
         win_rate_vs_sft=ppo_win,
         mean_kl_to_sft=ppo_kl,
-        harm_rate=ppo_harm,
-        helpfulness=ppo_help,
+        harm_rate=ppo_stats.harm_rate,
+        helpfulness=ppo_stats.helpfulness,
     )
 
-    # --- Pairwise logprob win vs SFT (one policy at a time, then compare cached LPs) ---
-    print("Pairwise win-rates vs SFT (logprob on gold chosen)...")
-    sft = _load_policy(settings, tokenizer, ckpt_dir, "sft.pt", device)
-    sft_lps = _chosen_logprobs(sft, prefs, tokenizer, settings, device)
-    _free_cuda(sft)
-
-    dpo = _load_policy(settings, tokenizer, ckpt_dir, "dpo.pt", device)
-    dpo_lps = _chosen_logprobs(dpo, prefs, tokenizer, settings, device)
-    _free_cuda(dpo)
-    dpo_rank_win = sum(1 for c, b in zip(dpo_lps, sft_lps) if c >= b) / max(len(prefs), 1)
-
-    ppo = _load_policy(settings, tokenizer, ckpt_dir, "ppo.pt", device)
-    ppo_lps = _chosen_logprobs(ppo, prefs, tokenizer, settings, device)
-    _free_cuda(ppo)
-    ppo_pref_win = sum(1 for c, b in zip(ppo_lps, sft_lps) if c >= b) / max(len(prefs), 1)
-
-    # --- Closed-set RM win: pick per policy, then score picks with RM alone ---
-    print("Closed-set RM win (PPO vs SFT)...")
-    sft = _load_policy(settings, tokenizer, ckpt_dir, "sft.pt", device)
-    sft_picks = _preferred_responses(sft, prefs, tokenizer, settings, device)
-    _free_cuda(sft)
-    ppo = _load_policy(settings, tokenizer, ckpt_dir, "ppo.pt", device)
-    ppo_picks = _preferred_responses(ppo, prefs, tokenizer, settings, device)
-    _free_cuda(ppo)
-    rm = _load_reward(settings, tokenizer, ckpt_dir, device)
-    ppo_closed = _rm_win_from_picks(rm, prefs, ppo_picks, sft_picks, tokenizer, settings, device)
-    _free_cuda(rm)
-
-    ppo_gen_win = float(ppo_m.win_rate_vs_sft or 0.0)
-    ppo_rank_win = 0.5 * ppo_closed + 0.5 * ppo_gen_win
+    n_prefs = max(len(prefs), 1)
+    dpo_rank_win = (
+        sum(1 for c, b in zip(dpo_stats.chosen_logprobs, sft_stats.chosen_logprobs) if c >= b)
+        / n_prefs
+    )
+    ppo_pref_win = (
+        sum(1 for c, b in zip(ppo_stats.chosen_logprobs, sft_stats.chosen_logprobs) if c >= b)
+        / n_prefs
+    )
+    ppo_rank_win = 0.5 * ppo_closed + 0.5 * ppo_win
 
     pref_lift = (dpo_m.preference_accuracy - sft_m.preference_accuracy) / max(
         sft_m.preference_accuracy, 1e-6
