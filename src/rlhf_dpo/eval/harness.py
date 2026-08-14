@@ -54,6 +54,7 @@ class AggregateReport:
     wall_clock_seconds: dict[str, float]
     headline: dict[str, float]
     training_wall_clock_seconds: dict[str, float] = field(default_factory=dict)
+    grpo: MethodMetrics | None = None
 
 
 def _release_module(mod) -> None:
@@ -285,8 +286,18 @@ def run_eval(
     )
     wall["ppo"] = t_ppo
 
-    # --- KL vs SFT: reload SFT once on DPO/PPO completions ---
-    print("KL vs SFT (reload SFT on DPO/PPO completions)...")
+    grpo_ckpt = ckpt_dir / "grpo.pt"
+    grpo_stats = None
+    grpo_responses: list[str] = []
+    grpo_pol_lps: list[float] = []
+    if grpo_ckpt.exists():
+        grpo_stats, grpo_responses, grpo_pol_lps, t_grpo = eval_policy(
+            "grpo", gen=True, kl_on_own_gen=True
+        )
+        wall["grpo"] = t_grpo
+
+    # --- KL vs SFT: reload SFT once on DPO/PPO/(GRPO) completions ---
+    print("KL vs SFT (reload SFT on policy completions)...")
     sft = _load_policy(settings, tokenizer, ckpt_dir, "sft.pt", device)
     sft_on_dpo = _completion_lp_means(
         sft, gen_prompts, dpo_responses, tokenizer, settings, device, desc="kl-sft-dpo"
@@ -294,9 +305,19 @@ def run_eval(
     sft_on_ppo = _completion_lp_means(
         sft, gen_prompts, ppo_responses, tokenizer, settings, device, desc="kl-sft-ppo"
     )
+    sft_on_grpo: list[float] = []
+    if grpo_stats is not None:
+        sft_on_grpo = _completion_lp_means(
+            sft, gen_prompts, grpo_responses, tokenizer, settings, device, desc="kl-sft-grpo"
+        )
     _free_cuda(sft)
     dpo_kl = sum(p - s for p, s in zip(dpo_pol_lps, sft_on_dpo)) / max(len(dpo_pol_lps), 1)
     ppo_kl = sum(p - s for p, s in zip(ppo_pol_lps, sft_on_ppo)) / max(len(ppo_pol_lps), 1)
+    grpo_kl = (
+        sum(p - s for p, s in zip(grpo_pol_lps, sft_on_grpo)) / max(len(grpo_pol_lps), 1)
+        if grpo_stats is not None
+        else None
+    )
 
     # --- Reward model once: pair acc + gen scores + closed-set RM win ---
     print("Scoring reward model (pair acc + generation rewards + closed-set wins)...")
@@ -305,6 +326,11 @@ def run_eval(
     sft_rewards = _score_responses(rm, gen_prompts, sft_responses, tokenizer, settings, device)
     dpo_rewards = _score_responses(rm, gen_prompts, dpo_responses, tokenizer, settings, device)
     ppo_rewards = _score_responses(rm, gen_prompts, ppo_responses, tokenizer, settings, device)
+    grpo_rewards: list[float] = []
+    if grpo_stats is not None:
+        grpo_rewards = _score_responses(
+            rm, gen_prompts, grpo_responses, tokenizer, settings, device
+        )
     ppo_closed = _rm_win_from_picks(
         rm,
         prefs,
@@ -314,6 +340,17 @@ def run_eval(
         settings,
         device,
     )
+    grpo_closed = 0.0
+    if grpo_stats is not None:
+        grpo_closed = _rm_win_from_picks(
+            rm,
+            prefs,
+            grpo_stats.preferred_responses,
+            sft_stats.preferred_responses,
+            tokenizer,
+            settings,
+            device,
+        )
     _free_cuda(rm)
 
     sft_mean_r = sum(sft_rewards) / max(len(sft_rewards), 1)
@@ -325,6 +362,21 @@ def run_eval(
     ppo_win = sum(1 for rp, rs in zip(ppo_rewards, sft_rewards) if rp > rs) / max(
         len(ppo_rewards), 1
     )
+    grpo_m: MethodMetrics | None = None
+    if grpo_stats is not None:
+        grpo_mean_r = sum(grpo_rewards) / max(len(grpo_rewards), 1)
+        grpo_win = sum(1 for rp, rs in zip(grpo_rewards, sft_rewards) if rp > rs) / max(
+            len(grpo_rewards), 1
+        )
+        grpo_m = MethodMetrics(
+            name="grpo",
+            preference_accuracy=grpo_stats.preference_accuracy,
+            mean_gen_reward=grpo_mean_r,
+            win_rate_vs_sft=grpo_win,
+            mean_kl_to_sft=grpo_kl,
+            harm_rate=grpo_stats.harm_rate,
+            helpfulness=grpo_stats.helpfulness,
+        )
 
     sft_m = MethodMetrics(
         name="sft",
@@ -364,6 +416,19 @@ def run_eval(
         / n_prefs
     )
     ppo_rank_win = 0.5 * ppo_closed + 0.5 * ppo_win
+    grpo_rank_win = None
+    if grpo_stats is not None and grpo_m is not None:
+        grpo_pref_win = (
+            sum(
+                1
+                for c, b in zip(grpo_stats.chosen_logprobs, sft_stats.chosen_logprobs)
+                if c >= b
+            )
+            / n_prefs
+        )
+        grpo_rank_win = 0.5 * grpo_closed + 0.5 * float(grpo_m.win_rate_vs_sft or 0.0)
+    else:
+        grpo_pref_win = None
 
     pref_lift = (dpo_m.preference_accuracy - sft_m.preference_accuracy) / max(
         sft_m.preference_accuracy, 1e-6
@@ -382,6 +447,7 @@ def run_eval(
     train_times = training_times or {}
     dpo_s = float(train_times.get("dpo", wall.get("dpo", 1.0)))
     ppo_s = float(train_times.get("ppo", wall.get("ppo", 1.0)))
+    grpo_s = float(train_times.get("grpo", wall.get("grpo", 0.0)))
     speedup = ppo_s / max(dpo_s, 1e-8)
 
     reward_adv = dpo_m.mean_gen_reward - ppo_m.mean_gen_reward
@@ -411,6 +477,14 @@ def run_eval(
         "reward_model_pair_accuracy": round(rm_acc, 4),
         "dpo_vs_ppo_reward_delta": round(reward_adv, 4),
     }
+    if grpo_m is not None:
+        headline["grpo_preference_accuracy"] = round(grpo_m.preference_accuracy, 4)
+        headline["grpo_harm_rate"] = round(grpo_m.harm_rate or 0.0, 4)
+        headline["grpo_helpfulness"] = round(grpo_m.helpfulness or 0.0, 4)
+        headline["grpo_win_rate_vs_base"] = round(float(grpo_rank_win or 0.0), 4)
+        headline["grpo_preference_win_vs_base"] = round(float(grpo_pref_win or 0.0), 4)
+        headline["grpo_gen_win_rate_vs_sft"] = round(grpo_m.win_rate_vs_sft or 0.0, 4)
+        headline["grpo_train_seconds"] = round(grpo_s, 3)
 
     return AggregateReport(
         n_eval=len(prefs),
@@ -421,11 +495,13 @@ def run_eval(
         dpo_vs_ppo_reward_advantage=reward_adv,
         dpo_compute_note=(
             "DPO is a single-stage classification objective (no online sampling / critic); "
-            "PPO-RLHF requires reward model + on-policy rollouts + clipped policy-gradient updates."
+            "PPO-RLHF requires reward model + on-policy rollouts + clipped policy-gradient updates; "
+            "GRPO drops the critic and uses group-relative advantages within G answers per prompt."
         ),
         wall_clock_seconds=wall,
         headline=headline,
         training_wall_clock_seconds=train_times,
+        grpo=grpo_m,
     )
 
 

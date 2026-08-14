@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     ppo_batch_size: int = 8  # keep >=2; size 1 zeroes mean-centered advantages
     reward_norm_eps: float = 1e-6
 
+    # GRPO (Group Relative Policy Optimization): no critic; advantages from group z-score.
+    grpo_steps: int = 800
+    grpo_group_size: int = 4  # G completions / preference answers per prompt
+    grpo_clip: float = 0.2
+    grpo_kl_coef: float = 0.22
+    # False = offline groups from preference answers that share a prompt (QLoRA-friendly).
+    # True = also generate fill-in completions from the current policy.
+    grpo_online: bool = False
+
     data_dir: Path = Field(default_factory=lambda: ROOT / "data")
     ckpt_dir: Path = Field(default_factory=lambda: ROOT / "checkpoints")
     results_dir: Path = Field(default_factory=lambda: ROOT / "results")
