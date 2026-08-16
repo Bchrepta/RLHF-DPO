@@ -101,6 +101,25 @@ Notes:
 - If you still OOM, keep batch size 1 or use TinyLlama fp16 LoRA for faster iteration.
 - After pulling QLoRA fixes, delete `checkpoints` and re-run `train-all` (prior DPO/PPO weights from a NaN/no-grad run are not useful).
 
+### GRPO (Group Relative Policy Optimization)
+
+No critic / value network. For each prompt, take a group of **G** answers, z-score their RM rewards inside the group, then clipped policy-gradient + KL to SFT (DeepSeekMath-style).
+
+This synthetic corpus has only ~20 unique prompts with hundreds of preference answers each, so the **default offline mode** builds groups from those answers (QLoRA-friendly: same VRAM pattern as PPO). Set `GRPO_ONLINE=true` to also generate fill-in completions.
+
+PowerShell (after SFT + reward exist; keeps your DPO/PPO checkpoints):
+
+```powershell
+$env:GRPO_STEPS = "800"
+$env:GRPO_GROUP_SIZE = "4"
+$env:GRPO_ONLINE = "false"
+rlhf-dpo train-grpo
+rlhf-dpo eval --gen-limit 12
+rlhf-dpo demo-safety --method grpo
+```
+
+Or fold into the full pipeline: `rlhf-dpo train-all --with-grpo`.
+
 ## Pipeline
 
 1. Synthetic dual-domain preferences (safety + helpfulness, ~5k)
@@ -108,7 +127,8 @@ Notes:
 3. Bradley-Terry reward model (reward normalization + grad clipping)
 4. DPO (safety-upweighted)
 5. PPO-RLHF with KL penalty to the SFT reference
-6. Safety eval (harm, help, pref lift, win rates, wall clock)
+6. Optional GRPO (group-relative advantages, no critic)
+7. Safety eval (harm, help, pref lift, win rates, wall clock)
 
 ## License
 

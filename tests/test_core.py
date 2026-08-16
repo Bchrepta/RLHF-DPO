@@ -97,6 +97,8 @@ def test_tiny_train_smoke():
             dpo_epochs=1,
             ppo_steps=4,
             ppo_batch_size=2,
+            grpo_steps=4,
+            grpo_group_size=4,
             batch_size=16,
             data_dir=root / "data",
             ckpt_dir=root / "ckpt",
@@ -107,10 +109,25 @@ def test_tiny_train_smoke():
         train_reward_model(settings)
         train_dpo(settings)
         train_ppo(settings)
+        from rlhf_dpo.train.grpo import train_grpo
+
+        train_grpo(settings)
         report = run_eval(settings, gen_limit=8)
         assert report.n_eval == 24
         assert 0.0 <= report.dpo.preference_accuracy <= 1.0
         assert report.headline["ppo_win_rate_vs_base"] is not None
+        assert report.grpo is not None
+        assert 0.0 <= report.grpo.preference_accuracy <= 1.0
+
+
+def test_grpo_group_advantages():
+    from rlhf_dpo.train.grpo import _group_advantages
+
+    rewards = torch.tensor([1.0, 3.0, 5.0, 7.0])
+    adv = _group_advantages(rewards, eps=1e-6)
+    assert torch.allclose(adv.mean(), torch.tensor(0.0), atol=1e-5)
+    assert torch.allclose(adv.std(unbiased=False), torch.tensor(1.0), atol=1e-5)
+    assert adv[0] < 0 < adv[-1]
 
 
 def test_hf_backbone_optional():

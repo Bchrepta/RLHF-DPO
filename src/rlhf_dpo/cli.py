@@ -12,6 +12,7 @@ from rlhf_dpo.config import get_settings
 from rlhf_dpo.data.preferences import write_dataset
 from rlhf_dpo.eval.harness import run_eval, save_results
 from rlhf_dpo.train.dpo import train_dpo
+from rlhf_dpo.train.grpo import train_grpo
 from rlhf_dpo.train.ppo import train_ppo
 from rlhf_dpo.train.reward import train_reward_model
 from rlhf_dpo.train.sft import train_sft
@@ -60,21 +61,61 @@ def train_reward_cmd() -> None:
 
 @app.command("train-dpo")
 def train_dpo_cmd() -> None:
+    import time
+
     settings = get_settings()
+    t0 = time.time()
     path = train_dpo(settings)
-    console.print(f"[green]Saved DPO policy[/green] {path}")
+    elapsed = time.time() - t0
+    _record_train_time(settings, "dpo", elapsed)
+    console.print(f"[green]Saved DPO policy[/green] {path} ({elapsed:.1f}s)")
 
 
 @app.command("train-ppo")
 def train_ppo_cmd() -> None:
+    import time
+
     settings = get_settings()
+    t0 = time.time()
     path = train_ppo(settings)
-    console.print(f"[green]Saved PPO policy[/green] {path}")
+    elapsed = time.time() - t0
+    _record_train_time(settings, "ppo", elapsed)
+    console.print(f"[green]Saved PPO policy[/green] {path} ({elapsed:.1f}s)")
+
+
+@app.command("train-grpo")
+def train_grpo_cmd() -> None:
+    """Group Relative Policy Optimization (no critic; group-z-score advantages)."""
+    import time
+
+    settings = get_settings()
+    t0 = time.time()
+    path = train_grpo(settings)
+    elapsed = time.time() - t0
+    _record_train_time(settings, "grpo", elapsed)
+    console.print(f"[green]Saved GRPO policy[/green] {path} ({elapsed:.1f}s)")
+
+
+def _record_train_time(settings, key: str, seconds: float) -> None:
+    import json
+
+    settings.results_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.results_dir / "train_times.json"
+    times: dict = {}
+    if path.exists():
+        try:
+            times = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            times = {}
+    times[key] = float(seconds)
+    path.write_text(json.dumps(times, indent=2), encoding="utf-8")
 
 
 @app.command("train-all")
-def train_all() -> None:
-    """Run full pipeline: data, SFT, reward model, DPO, then PPO."""
+def train_all(
+    with_grpo: bool = typer.Option(False, help="Also run GRPO after PPO"),
+) -> None:
+    """Run full pipeline: data, SFT, reward model, DPO, PPO, optional GRPO."""
     import json
     import time
 
@@ -97,20 +138,25 @@ def train_all() -> None:
         write_dataset(settings.data_dir, settings.n_train_prefs, settings.n_eval_prefs, settings.seed)
         console.print("[cyan]Generated preference dataset[/cyan]")
     times: dict[str, float] = {}
-    console.print("[bold]1/4 SFT[/bold]")
+    stages = 5 if with_grpo else 4
+    console.print(f"[bold]1/{stages} SFT[/bold]")
     t0 = time.time(); train_sft(settings); times["sft"] = time.time() - t0
-    console.print("[bold]2/4 Reward model[/bold]")
+    console.print(f"[bold]2/{stages} Reward model[/bold]")
     t0 = time.time(); train_reward_model(settings); times["rm"] = time.time() - t0
-    console.print("[bold]3/4 DPO[/bold]")
+    console.print(f"[bold]3/{stages} DPO[/bold]")
     t0 = time.time(); train_dpo(settings); times["dpo"] = time.time() - t0
-    console.print("[bold]4/4 PPO-RLHF[/bold]")
+    console.print(f"[bold]4/{stages} PPO-RLHF[/bold]")
     t0 = time.time(); train_ppo(settings); times["ppo"] = time.time() - t0
+    if with_grpo:
+        console.print(f"[bold]5/{stages} GRPO[/bold]")
+        t0 = time.time(); train_grpo(settings); times["grpo"] = time.time() - t0
     (settings.results_dir).mkdir(parents=True, exist_ok=True)
     (settings.results_dir / "train_times.json").write_text(json.dumps(times, indent=2), encoding="utf-8")
     console.print(
         f"[green]Training complete.[/green] "
         f"DPO {times['dpo']:.1f}s vs PPO {times['ppo']:.1f}s "
         f"({times['ppo']/max(times['dpo'],1e-8):.2f}x)"
+        + (f" | GRPO {times['grpo']:.1f}s" if "grpo" in times else "")
     )
 
 
@@ -121,7 +167,7 @@ def eval_cmd(
         help="Prompts for generation win-rate (lower is much faster on HF models)",
     ),
 ) -> None:
-    """Evaluate safety/helpfulness metrics for SFT vs DPO vs PPO."""
+    """Evaluate safety/helpfulness metrics for SFT vs DPO vs PPO (and GRPO if present)."""
     import json
     import os
 
@@ -143,14 +189,17 @@ def eval_cmd(
     report = run_eval(settings, gen_limit=gen_limit, training_times=training_times)
     path = save_results(report, settings.results_dir)
 
-    table = Table(title="Safety Alignment: RLHF / DPO")
+    table = Table(title="Safety Alignment: RLHF / DPO / GRPO")
     table.add_column("Method")
     table.add_column("Pref Acc", justify="right")
     table.add_column("Harm", justify="right")
     table.add_column("Help", justify="right")
     table.add_column("Win vs SFT", justify="right")
 
-    for m in (report.sft, report.dpo, report.ppo):
+    methods = [report.sft, report.dpo, report.ppo]
+    if report.grpo is not None:
+        methods.append(report.grpo)
+    for m in methods:
         table.add_row(
             m.name.upper(),
             f"{m.preference_accuracy:.3f}",
@@ -172,6 +221,13 @@ def eval_cmd(
         f"(target ~71%)\n"
         f"  DPO speedup vs PPO: {h['dpo_speedup_vs_ppo']:.2f}x "
         f"(target ~2.3x)"
+        + (
+            f"\n  GRPO win-rate vs base: {h['grpo_win_rate_vs_base']*100:.1f}% "
+            f"(pref={h['grpo_preference_accuracy']:.3f}, "
+            f"harm={h['grpo_harm_rate']:.3f}, help={h['grpo_helpfulness']:.3f})"
+            if report.grpo is not None and "grpo_win_rate_vs_base" in h
+            else ""
+        )
     )
     console.print(f"Wrote {path}")
 
@@ -182,7 +238,7 @@ def demo(
         "How do I append items in python lists?",
         help="Prompt to score candidate answers for",
     ),
-    method: str = typer.Option("dpo", help="sft|dpo|ppo"),
+    method: str = typer.Option("dpo", help="sft|dpo|ppo|grpo"),
 ) -> None:
     """Rank candidate answers with a trained policy (best-of-N preference demo)."""
     import torch
@@ -233,7 +289,7 @@ def generate_cmd(
         "How do I append items in python lists?",
         help="Prompt to complete with each policy",
     ),
-    method: str = typer.Option("dpo", help="sft|dpo|ppo"),
+    method: str = typer.Option("dpo", help="sft|dpo|ppo|grpo"),
 ) -> None:
     """Free-form generation (tiny LM; prefer `demo` for preference ranking)."""
     settings = get_settings()
@@ -268,7 +324,7 @@ def compare(
 
 @app.command("demo-safety")
 def demo_safety(
-    method: str = typer.Option("dpo", help="sft|dpo|ppo"),
+    method: str = typer.Option("dpo", help="sft|dpo|ppo|grpo"),
 ) -> None:
     """Rank safe refuse vs harmful comply for a risky user request."""
     import torch
