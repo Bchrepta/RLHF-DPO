@@ -120,6 +120,13 @@ def test_tiny_train_smoke():
         assert 0.0 <= report.grpo.preference_accuracy <= 1.0
 
 
+def test_free_cuda_noop():
+    from rlhf_dpo.utils import free_cuda
+
+    free_cuda()
+    free_cuda(None)
+
+
 def test_grpo_group_advantages():
     from rlhf_dpo.train.grpo import _group_advantages
 

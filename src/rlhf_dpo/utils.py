@@ -52,6 +52,50 @@ def is_quantized_module(model: torch.nn.Module) -> bool:
     return False
 
 
+def free_cuda(*objs) -> None:
+    """Drop PEFT / bitsandbytes refs and reclaim CUDA memory between QLoRA loads."""
+    import gc
+
+    def _release(mod) -> None:
+        if mod is None:
+            return
+        releaser = getattr(mod, "release_cuda", None)
+        if callable(releaser):
+            try:
+                releaser()
+                return
+            except Exception:
+                pass
+        try:
+            from accelerate.hooks import remove_hook_from_module
+
+            remove_hook_from_module(mod, recurse=True)
+        except Exception:
+            pass
+        for attr in ("model", "base_model", "backbone"):
+            inner = getattr(mod, attr, None)
+            if inner is not None and inner is not mod:
+                _release(inner)
+                try:
+                    setattr(mod, attr, None)
+                except Exception:
+                    pass
+
+    for obj in objs:
+        _release(obj)
+        del obj
+    gc.collect()
+    gc.collect()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        torch.cuda.empty_cache()
+        if hasattr(torch.cuda, "ipc_collect"):
+            torch.cuda.ipc_collect()
+
+
 def place_model(model: torch.nn.Module, device: torch.device) -> torch.nn.Module:
     """
     Move a model to device, skipping .to() for 4-bit modules (already device-mapped).
