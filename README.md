@@ -105,7 +105,7 @@ Notes:
 
 No critic / value network. For each prompt, take a group of **G** answers, z-score their RM rewards inside the group, then clipped policy-gradient + KL to SFT (DeepSeekMath-style).
 
-Offline groups from preference answers that share a prompt (QLoRA-friendly: same VRAM pattern as PPO — cache RM, then **trainable policy + inference-only frozen ref** so the ref skips kbit fp16→fp32 casts). Set `GRPO_ONLINE=true` to also generate fill-in completions.
+Offline groups from preference answers that share a prompt. On QLoRA / 10GB the pipeline is: cache RM scores → free → cache SFT reference logprobs → free → train with **only the policy** in VRAM (never two 7B copies). Set `GRPO_ONLINE=true` to also generate fill-in completions.
 
 PowerShell (after SFT + reward exist; keeps your DPO/PPO checkpoints):
 

@@ -38,6 +38,7 @@ def _precompute_pref_rewards(
     device: torch.device,
 ) -> list[tuple[float, float]]:
     free_cuda()
+    print("GRPO: loading reward model (inference-only) to cache scores...")
     rm = place_model(build_reward_model(settings, tokenizer, for_inference=True), device)
     if reward_ckpt.exists():
         load_checkpoint(rm, reward_ckpt, device)
@@ -54,6 +55,45 @@ def _precompute_pref_rewards(
 
     free_cuda(rm)
     return scored
+
+
+def _precompute_ref_logprobs(
+    settings: Settings,
+    tokenizer,
+    pools: dict[str, list[tuple[str, float]]],
+    sft_ckpt: Path,
+    device: torch.device,
+) -> dict[tuple[str, str], float]:
+    """
+    Score every unique (prompt, response) under the frozen SFT policy, then free it.
+
+    Lets QLoRA GRPO train with only the trainable policy resident (no policy+ref pair).
+    """
+    free_cuda()
+    print("GRPO: caching SFT reference logprobs (inference-only), then freeing ref...")
+    ref = place_model(build_lm(settings, tokenizer, for_inference=True), device)
+    if sft_ckpt.exists():
+        load_checkpoint(ref, sft_ckpt, device)
+    ref.eval()
+
+    cache: dict[tuple[str, str], float] = {}
+    items = [(p, text) for p, cands in pools.items() for text, _ in cands]
+    with torch.no_grad():
+        for prompt, text in tqdm(items, desc="grpo-cache-ref-lp", leave=False):
+            key = (prompt, text)
+            if key in cache:
+                continue
+            ids, mask, plen = encode_pair(tokenizer, prompt, text, settings.max_seq_len)
+            lp = float(
+                completion_logprob_mean(
+                    ref, ids.unsqueeze(0).to(device), mask.unsqueeze(0).to(device), plen
+                ).item()
+            )
+            cache[key] = lp
+
+    free_cuda(ref)
+    print(f"GRPO: cached {len(cache)} reference logprobs")
+    return cache
 
 
 def _build_prompt_pools(
@@ -93,15 +133,12 @@ def train_grpo(
     GRPO: sample a group of G answers per prompt, z-score rewards within the group,
     then take a clipped policy-gradient step with KL to the SFT reference.
 
-    No value/critic network (the point of GRPO vs PPO).
+    QLoRA / 10GB path (default when LOAD_IN_4BIT=true):
+      1) cache RM scores → free
+      2) cache SFT ref logprobs for all pool answers → free
+      3) train with **only the policy** in VRAM (KL uses the cache)
 
-    Modes:
-    - offline (default on QLoRA): build groups from preference responses that share
-      a prompt (this synthetic set has ~20 prompts with hundreds of answers each).
-    - online (`GRPO_ONLINE=true`): generate G completions, score with the RM.
-
-    VRAM (QLoRA / 3080): cache RM → free; load trainable policy; load frozen ref with
-    ``for_inference=True`` (skips kbit fp16→fp32 casts) so policy+ref fit 10GB.
+    Non-4bit / plenty of VRAM: keep a live frozen ref beside the policy.
     """
     set_seed(settings.seed)
     device = get_device(settings)
@@ -121,6 +158,8 @@ def train_grpo(
     # On 4-bit, default offline unless explicitly online.
     if quantized and not getattr(settings, "grpo_online", False):
         online = False
+    # Never hold two 7B QLoRA copies: cache SFT logprobs, train with policy only.
+    cache_ref = quantized or bool(getattr(settings, "grpo_cache_ref", False))
 
     reward_cache: list[tuple[float, float]] | None = None
     rm = None
@@ -141,20 +180,25 @@ def train_grpo(
     if not prompt_list:
         raise RuntimeError("GRPO: need at least one prompt with >=2 scored responses")
 
-    # Policy needs training LoRA; frozen ref loads inference-only (skips kbit fp32 casts)
-    # so policy+ref fit a 10GB 3080 after the RM cache pass.
+    ref_lp_cache: dict[tuple[str, str], float] | None = None
+    ref = None
+    if cache_ref:
+        ref_lp_cache = _precompute_ref_logprobs(settings, tokenizer, pools, sft_ckpt, device)
+    else:
+        free_cuda()
+        print("GRPO: loading frozen reference (inference-only)...")
+        ref = place_model(build_lm(settings, tokenizer, for_inference=True), device)
+        if sft_ckpt.exists():
+            load_checkpoint(ref, sft_ckpt, device)
+        for p in ref.parameters():
+            p.requires_grad_(False)
+        ref.eval()
+
     free_cuda()
-    print("GRPO: loading trainable policy...")
+    print("GRPO: loading trainable policy (only large model kept in VRAM)..." if cache_ref else "GRPO: loading trainable policy...")
     policy = place_model(build_lm(settings, tokenizer, for_inference=False), device)
-    free_cuda()  # reclaim allocator fragmentation before the second 4-bit load
-    print("GRPO: loading frozen reference (inference-only)...")
-    ref = place_model(build_lm(settings, tokenizer, for_inference=True), device)
     if sft_ckpt.exists():
         load_checkpoint(policy, sft_ckpt, device)
-        load_checkpoint(ref, sft_ckpt, device)
-    for p in ref.parameters():
-        p.requires_grad_(False)
-    ref.eval()
 
     disable_gradient_checkpointing(policy)
     trainable = [p for p in policy.parameters() if p.requires_grad]
@@ -167,7 +211,8 @@ def train_grpo(
     opt = torch.optim.AdamW(trainable, lr=lr)
     print(
         f"GRPO lr={lr:.2e} group_size={group_size} steps={steps} "
-        f"online={online} prompts={len(prompt_list)} trainable={len(trainable)}"
+        f"online={online} cache_ref={cache_ref} prompts={len(prompt_list)} "
+        f"trainable={len(trainable)}"
     )
 
     rng = random.Random(settings.seed + 17)
@@ -183,14 +228,12 @@ def train_grpo(
         responses: list[str] = []
         rewards: list[float] = []
 
-        # Always seed with diverse preference answers for this prompt.
         take = min(group_size, len(candidates))
         seeded = rng.sample(candidates, k=take)
         for text, reward in seeded:
             responses.append(text)
             rewards.append(reward)
 
-        # Optional online fill: generate remaining slots from the current policy.
         if online and len(responses) < group_size:
             policy.eval()
             pids = encode_prompt(tokenizer, prompt, settings.max_seq_len // 2).unsqueeze(0).to(device)
@@ -214,8 +257,6 @@ def train_grpo(
                             float(rm(ids.unsqueeze(0).to(device), mask.unsqueeze(0).to(device)).item())
                         )
                 else:
-                    # No live RM (QLoRA offline path): assign a neutral prior so
-                    # preference-seeded answers dominate the group signal.
                     rewards.append(0.0)
 
         responses = responses[:group_size]
@@ -239,7 +280,12 @@ def train_grpo(
         policy.eval()
         with torch.no_grad():
             old_logp = completion_logprob_mean(policy, ids_b, mask_b, plen_t)
-            ref_logp = completion_logprob_mean(ref, ids_b, mask_b, plen_t)
+            if ref_lp_cache is not None:
+                ref_vals = [ref_lp_cache[(prompt, text)] for text in responses]
+                ref_logp = torch.tensor(ref_vals, device=device, dtype=old_logp.dtype)
+            else:
+                assert ref is not None
+                ref_logp = completion_logprob_mean(ref, ids_b, mask_b, plen_t)
 
         new_logp = completion_logprob_mean(policy, ids_b, mask_b, plen_t)
         if not new_logp.requires_grad:
@@ -247,7 +293,6 @@ def train_grpo(
                 "GRPO: policy logprobs have no grad. Try GRADIENT_CHECKPOINTING=false."
             )
 
-        # DeepSeek-style: KL as an additive loss term (not inside the advantage).
         log_ratio = (ref_logp - new_logp).clamp(-5.0, 5.0)
         kl = (torch.exp(log_ratio) - log_ratio - 1.0).clamp_min(0.0)
 
