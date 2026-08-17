@@ -24,7 +24,7 @@ After `rlhf-dpo train-all && rlhf-dpo eval` on the default toy backbone:
 
 ### Hugging Face + LoRA (RTX 3080)
 
-Measured on **TinyLlama-1.1B-Chat + LoRA**, `DEVICE=cuda`, `BATCH_SIZE=2`, `MAX_SEQ_LEN=128` (see `results/metrics.json`):
+Measured on **TinyLlama-1.1B-Chat + LoRA**, `DEVICE=cuda`, `BATCH_SIZE=2`, `MAX_SEQ_LEN=128`:
 
 | Metric | Target (Mistral-7B) | TinyLlama + LoRA |
 | --- | ---: | ---: |
@@ -36,7 +36,30 @@ Measured on **TinyLlama-1.1B-Chat + LoRA**, `DEVICE=cuda`, `BATCH_SIZE=2`, `MAX_
 
 \*Relative pref lift is large because SFT is intentionally underfit on this synthetic set; absolute DPO pref accuracy is **0.994** vs SFT **0.134**.
 
-Qualitative `demo-safety` (malware prompt): SFT ranks poorly; DPO/PPO put the correct refusal first and push harmful completions down.
+### QLoRA Mistral-7B (RTX 3080, 10GB)
+
+Measured on **`mistralai/Mistral-7B-v0.1` + QLoRA** (`LOAD_IN_4BIT=true`, `BATCH_SIZE=1`, `PPO_BATCH_SIZE=2`, `MAX_SEQ_LEN=128`, `eval --gen-limit 12`). See `results/metrics.json`.
+
+| Method | Pref Acc | Harm | Help | Win vs SFT (n=12) |
+| --- | ---: | ---: | ---: | ---: |
+| SFT | 0.651 | 0.375 | 0.941 | — |
+| **DPO** | **0.961** | 0.065 | **1.000** | 0.667 |
+| PPO | 0.762 | **0.015** | 0.833 | 0.500 |
+| GRPO | 0.863 | 0.109 | 0.963 | 0.250† |
+
+| Headline | Target | This run |
+| --- | ---: | ---: |
+| DPO harm reduction vs SFT | ~68% | **82.7%** |
+| DPO helpfulness retained | ~94% | **94.0%** |
+| DPO preference improvement | ~23% | **47.6%** |
+| PPO win-rate vs base | ~71% | **52.8%** |
+| GRPO win-rate vs base | — | **42.8%** |
+
+†Generation win-rate on 12 prompts is noisy; closed-set pref / harm / help are the reliable columns.
+
+**Method tradeoffs on this run:** DPO leads on preference accuracy and helpfulness with strong harm reduction. PPO reaches the lowest harm but drops help. GRPO (no critic, ~1.5h after SFT/RM) sits in between on prefs, keeps help (~0.96), and cuts harm a lot vs SFT.
+
+Qualitative `demo-safety` (malware prompt): SFT / DPO / GRPO all rank safe refusals above malware/SQLi; DPO separates harmful completes most strongly.
 
 ## Quickstart (toy / CPU)
 
