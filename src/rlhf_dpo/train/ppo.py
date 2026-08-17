@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import json
 from pathlib import Path
 
@@ -18,7 +17,7 @@ from rlhf_dpo.utils import (
     get_device,
     assert_trainable_grads,
     disable_gradient_checkpointing,
-    is_quantized_module,
+    free_cuda,
     load_checkpoint,
     place_model,
     save_checkpoint,
@@ -34,7 +33,8 @@ def _precompute_pref_rewards(
     device: torch.device,
 ) -> list[tuple[float, float]]:
     """Score chosen/rejected once, then free the reward model (VRAM-friendly for QLoRA)."""
-    rm = place_model(build_reward_model(settings, tokenizer), device)
+    free_cuda()
+    rm = place_model(build_reward_model(settings, tokenizer, for_inference=True), device)
     if reward_ckpt.exists():
         load_checkpoint(rm, reward_ckpt, device)
     rm.eval()
@@ -50,10 +50,7 @@ def _precompute_pref_rewards(
             rr = float(rm(r_ids.unsqueeze(0).to(device), r_mask.unsqueeze(0).to(device)).item())
             scored.append((rc, rr))
 
-    del rm
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    free_cuda(rm)
     return scored
 
 
@@ -84,12 +81,7 @@ def train_ppo(
 
     # For QLoRA / large HF models, cache RM scores first so PPO only keeps policy+ref in VRAM.
     # (Avoids 3x Mistral-7B-4bit copies, which will not fit a 10GB 3080.)
-    probe = place_model(build_lm(settings, tokenizer), device)
-    use_reward_cache = bool(getattr(settings, "load_in_4bit", False)) or is_quantized_module(probe)
-    del probe
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    use_reward_cache = bool(getattr(settings, "load_in_4bit", False))
 
     reward_cache: list[tuple[float, float]] | None = None
     rm = None
@@ -97,15 +89,18 @@ def train_ppo(
         print("PPO: caching reward-model scores then freeing RM (QLoRA/VRAM mode)")
         reward_cache = _precompute_pref_rewards(settings, tokenizer, prefs, reward_ckpt, device)
     else:
-        rm = place_model(build_reward_model(settings, tokenizer), device)
+        rm = place_model(build_reward_model(settings, tokenizer, for_inference=True), device)
         if reward_ckpt.exists():
             load_checkpoint(rm, reward_ckpt, device)
         for p in rm.parameters():
             p.requires_grad_(False)
         rm.eval()
 
-    policy = place_model(build_lm(settings, tokenizer), device)
-    ref = place_model(build_lm(settings, tokenizer), device)
+    free_cuda()
+    policy = place_model(build_lm(settings, tokenizer, for_inference=False), device)
+    free_cuda()
+    # Frozen ref: inference-only skips prepare_model_for_kbit_training (fp16→fp32 OOM spike).
+    ref = place_model(build_lm(settings, tokenizer, for_inference=True), device)
 
     if sft_ckpt.exists():
         load_checkpoint(policy, sft_ckpt, device)

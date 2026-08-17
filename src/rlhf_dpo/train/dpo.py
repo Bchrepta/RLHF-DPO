@@ -58,8 +58,13 @@ def train_dpo(
     sft_ckpt = sft_ckpt or (settings.ckpt_dir / "sft.pt")
 
     tokenizer = build_tokenizer(data_dir, settings)
-    policy = place_model(build_lm(settings, tokenizer), device)
-    ref = place_model(build_lm(settings, tokenizer), device)
+    from rlhf_dpo.utils import free_cuda
+
+    free_cuda()
+    policy = place_model(build_lm(settings, tokenizer, for_inference=False), device)
+    free_cuda()
+    # Frozen ref loads inference-only so QLoRA policy+ref fit a 10GB card.
+    ref = place_model(build_lm(settings, tokenizer, for_inference=True), device)
     if sft_ckpt.exists():
         load_checkpoint(policy, sft_ckpt, device)
         load_checkpoint(ref, sft_ckpt, device)
